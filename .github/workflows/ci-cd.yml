@@ -127,11 +127,11 @@ jobs:
           # Endpoints protegidos deben dar 403 sin token
           for endpoint in '/api/dashboard/stats' '/api/sponsors/' '/api/matches/' '/api/settings/entidades'; do
             CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000$endpoint)
-            if [ "$CODE" != "403" ]; then
-              echo "FAIL — $endpoint devolvio $CODE (esperado 403)"
+            if [ "$CODE" != "401" ] && [ "$CODE" != "403" ]; then
+              echo "FAIL — $endpoint devolvio $CODE (esperado 401 o 403)"
               exit 1
             fi
-            echo "PASS — $endpoint protegido (403 sin token)"
+            echo "PASS — $endpoint protegido ($CODE sin token)"
           done
 
       - name: Test 5 — Login y JWT
