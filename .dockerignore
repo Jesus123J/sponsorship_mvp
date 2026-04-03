@@ -1,0 +1,11 @@
+venv/
+data/videos/
+data/frames/
+data/models/*.pt
+web/node_modules/
+web/.next/
+__pycache__/
+*.pyc
+.git/
+.env
+config/.env

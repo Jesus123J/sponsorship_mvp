@@ -1,19 +1,25 @@
-"""Conexion a MySQL reutilizable para FastAPI — usa config/.env existente."""
-import mysql.connector
-from dotenv import load_dotenv
-import os
+"""Conexion a MySQL con connection pooling para FastAPI."""
+import logging
+from mysql.connector import pooling
+from api.core.config import DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT, DB_POOL_SIZE
 
-load_dotenv("config/.env")
+logger = logging.getLogger(__name__)
+
+_pool = pooling.MySQLConnectionPool(
+    pool_name="sponsorship_pool",
+    pool_size=DB_POOL_SIZE,
+    pool_reset_session=True,
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASSWORD,
+    database=DB_NAME,
+    port=DB_PORT,
+)
 
 
 def get_connection():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD"),
-        database=os.getenv("DB_NAME", "sponsorship_mvp"),
-        port=int(os.getenv("DB_PORT", 3306)),
-    )
+    """Obtiene una conexion del pool."""
+    return _pool.get_connection()
 
 
 def fetch_all(query: str, params: tuple = None) -> list[dict]:
@@ -24,6 +30,9 @@ def fetch_all(query: str, params: tuple = None) -> list[dict]:
         result = cursor.fetchall()
         cursor.close()
         return result
+    except Exception as e:
+        logger.error(f"fetch_all error: {e}")
+        raise
     finally:
         conn.close()
 
@@ -36,5 +45,26 @@ def fetch_one(query: str, params: tuple = None) -> dict | None:
         result = cursor.fetchone()
         cursor.close()
         return result
+    except Exception as e:
+        logger.error(f"fetch_one error: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def execute(query: str, params: tuple = None) -> int:
+    """Ejecuta INSERT/UPDATE/DELETE y retorna lastrowid."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params or ())
+        conn.commit()
+        last_id = cursor.lastrowid
+        cursor.close()
+        return last_id
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"execute error: {e}")
+        raise
     finally:
         conn.close()
