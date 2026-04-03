@@ -2,7 +2,7 @@ name: CI/CD — Build, Test & Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
     branches: [main]
 
@@ -11,11 +11,11 @@ env:
   NODE_VERSION: "20"
 
 jobs:
-  # ══════════════════════════════════════
-  # JOB 1: Verificar Backend (API)
-  # ══════════════════════════════════════
-  backend:
-    name: Backend — Lint & Test
+  # ══════════════════════════════════════════════════════
+  # JOB 1: Tests del Backend
+  # ══════════════════════════════════════════════════════
+  backend-tests:
+    name: Backend — Tests
     runs-on: ubuntu-latest
 
     services:
@@ -32,6 +32,15 @@ jobs:
           --health-timeout=5s
           --health-retries=5
 
+    env:
+      DB_HOST: 127.0.0.1
+      DB_USER: root
+      DB_PASSWORD: test_password
+      DB_NAME: sponsorship_mvp
+      DB_PORT: 3306
+      JWT_SECRET: test-secret-ci-pipeline
+      ENV: development
+
     steps:
       - name: Checkout codigo
         uses: actions/checkout@v4
@@ -45,97 +54,238 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements-api.txt
 
-      - name: Crear tablas en MySQL de test
+      - name: Preparar base de datos de test
         run: |
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/schema.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/seed_data.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/seed_usuarios.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/tabla_sesiones.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/indices_optimizacion.sql
+          echo "BD de test lista"
 
-      - name: Verificar que la API carga correctamente
-        env:
-          DB_HOST: 127.0.0.1
-          DB_USER: root
-          DB_PASSWORD: test_password
-          DB_NAME: sponsorship_mvp
-          DB_PORT: 3306
-          JWT_SECRET: test-secret-ci
-          ENV: development
+      - name: Test 1 — Imports y estructura
         run: |
           python -c "
           from api.main import app
           routes = [r for r in app.routes if hasattr(r, 'methods')]
-          print(f'API cargada: {len(routes)} endpoints')
-          assert len(routes) >= 50, f'Faltan endpoints: solo {len(routes)}'
-          print('OK — Todos los routers y controllers importan correctamente')
+          print(f'Endpoints cargados: {len(routes)}')
+          assert len(routes) >= 50, f'Faltan endpoints: {len(routes)}'
+
+          # Verificar que todos los controllers importan
+          from api.controllers import auth_controller
+          from api.controllers import dashboard_controller
+          from api.controllers import detections_controller
+          from api.controllers import matches_controller
+          from api.controllers import sponsors_controller
+          from api.controllers import settings_controller
+          from api.controllers import plans_controller
+          from api.controllers import sessions_controller
+          from api.controllers import training_controller
+          from api.controllers import videos_controller
+          from api.controllers import pipeline_controller
+          print('OK — Todos los controllers importan')
+
+          # Verificar security
+          from api.core.security import create_access_token, get_current_user, require_admin
+          print('OK — Security module cargado')
+
+          # Verificar schemas
+          from api.schemas import LoginRequest, RegisterRequest, CreateSponsorRequest, PositionType
+          print('OK — Schemas cargados')
           "
 
-      - name: Test health check
-        env:
-          DB_HOST: 127.0.0.1
-          DB_USER: root
-          DB_PASSWORD: test_password
-          DB_NAME: sponsorship_mvp
-          DB_PORT: 3306
-          JWT_SECRET: test-secret-ci
-          ENV: development
+      - name: Test 2 — Iniciar servidor
         run: |
-          # Iniciar servidor en background
           uvicorn api.main:app --host 0.0.0.0 --port 8000 &
           sleep 3
+          echo "Servidor iniciado"
 
-          # Health check
+      - name: Test 3 — Health check + conexion BD
+        run: |
           RESPONSE=$(curl -s http://localhost:8000/api/health)
-          echo "Health: $RESPONSE"
+          echo "Response: $RESPONSE"
           echo "$RESPONSE" | python -c "
           import sys, json
           data = json.load(sys.stdin)
           assert data['status'] == 'ok', 'Health check fallo'
-          assert data['database'] == 'connected', 'BD no conectada'
-          print('OK — Health check passed')
+          assert data['database'] == 'connected', f'BD: {data[\"database\"]}'
+          print('PASS — Health check OK, BD conectada')
           "
 
-      - name: Test login endpoint
-        env:
-          DB_HOST: 127.0.0.1
-          DB_USER: root
-          DB_PASSWORD: test_password
-          DB_NAME: sponsorship_mvp
-          DB_PORT: 3306
-          JWT_SECRET: test-secret-ci
-          ENV: development
+      - name: Test 4 — Endpoints publicos (sin auth)
         run: |
-          # Login
+          # Planes (publico)
+          PLANS=$(curl -s http://localhost:8000/api/plans/)
+          echo "Plans: $PLANS"
+          echo "$PLANS" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert isinstance(data, list), 'Plans debe ser lista'
+          print(f'PASS — {len(data)} planes disponibles')
+          "
+
+          # Endpoints protegidos deben dar 403 sin token
+          for endpoint in '/api/dashboard/stats' '/api/sponsors/' '/api/matches/' '/api/settings/entidades'; do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000$endpoint)
+            if [ "$CODE" != "403" ]; then
+              echo "FAIL — $endpoint devolvio $CODE (esperado 403)"
+              exit 1
+            fi
+            echo "PASS — $endpoint protegido (403 sin token)"
+          done
+
+      - name: Test 5 — Login y JWT
+        run: |
+          # Login correcto
           RESPONSE=$(curl -s -X POST http://localhost:8000/api/auth/login \
             -H "Content-Type: application/json" \
             -d '{"email":"admin@sponsorshipmvp.pe","password":"demo2025"}')
-          echo "Login: $RESPONSE"
-
-          # Verificar token
           echo "$RESPONSE" | python -c "
           import sys, json
           data = json.load(sys.stdin)
-          assert 'access_token' in data, 'No se recibio token'
+          assert 'access_token' in data, 'Falta access_token'
+          assert data['token_type'] == 'bearer', 'Token type incorrecto'
           assert data['user']['rol'] == 'admin', 'Rol incorrecto'
-          print(f'OK — Login exitoso: {data[\"user\"][\"email\"]} ({data[\"user\"][\"rol\"]})')
+          assert data['user']['email'] == 'admin@sponsorshipmvp.pe', 'Email incorrecto'
+          print(f'PASS — Login exitoso: {data[\"user\"][\"nombre\"]} ({data[\"user\"][\"rol\"]})')
           "
 
-          # Usar token para acceder a endpoint protegido
-          TOKEN=$(echo "$RESPONSE" | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-          STATS=$(curl -s http://localhost:8000/api/dashboard/stats \
-            -H "Authorization: Bearer $TOKEN")
-          echo "Dashboard stats: $STATS"
+          # Login incorrecto — password malo
+          BAD_PASS=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@sponsorshipmvp.pe","password":"wrong"}')
+          [ "$BAD_PASS" = "401" ] && echo "PASS — Password incorrecto da 401"
 
-          # Verificar que endpoint sin token da 403
-          FORBIDDEN=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/dashboard/stats)
-          echo "Sin token: HTTP $FORBIDDEN"
-          [ "$FORBIDDEN" = "403" ] && echo "OK — Endpoints protegidos correctamente"
+          # Login incorrecto — email no existe
+          BAD_EMAIL=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"noexiste@test.com","password":"123456"}')
+          [ "$BAD_EMAIL" = "401" ] && echo "PASS — Email inexistente da 401"
 
-  # ══════════════════════════════════════
-  # JOB 2: Verificar Frontend (Web)
-  # ══════════════════════════════════════
-  frontend:
+      - name: Test 6 — Endpoints autenticados con JWT
+        run: |
+          # Obtener token
+          TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@sponsorshipmvp.pe","password":"demo2025"}' \
+            | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+          AUTH="Authorization: Bearer $TOKEN"
+
+          # Dashboard stats
+          curl -s http://localhost:8000/api/dashboard/stats -H "$AUTH" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert 'partidos' in data, 'Falta partidos'
+          assert 'smv_total' in data, 'Falta smv_total'
+          print(f'PASS — Dashboard: {data[\"partidos\"]} partidos, {data[\"sponsors\"]} sponsors')
+          "
+
+          # Sponsors
+          curl -s http://localhost:8000/api/sponsors/ -H "$AUTH" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert isinstance(data, list), 'Sponsors debe ser lista'
+          assert len(data) > 0, 'Debe haber sponsors'
+          print(f'PASS — {len(data)} sponsors cargados')
+          "
+
+          # Matches
+          curl -s http://localhost:8000/api/matches/ -H "$AUTH" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert isinstance(data, list), 'Matches debe ser lista'
+          print(f'PASS — {len(data)} partidos')
+          "
+
+          # Settings
+          curl -s http://localhost:8000/api/settings/entidades -H "$AUTH" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert isinstance(data, list), 'Entidades debe ser lista'
+          print(f'PASS — {len(data)} entidades')
+          "
+
+          # Mi perfil
+          curl -s http://localhost:8000/api/auth/me -H "$AUTH" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert data['email'] == 'admin@sponsorshipmvp.pe', 'Email incorrecto'
+          print(f'PASS — Perfil: {data[\"nombre\"]} ({data[\"rol\"]})')
+          "
+
+      - name: Test 7 — Sesiones en BD
+        run: |
+          TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@sponsorshipmvp.pe","password":"demo2025"}' \
+            | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+          AUTH="Authorization: Bearer $TOKEN"
+
+          # Ver sesiones activas
+          curl -s http://localhost:8000/api/auth/sessions -H "$AUTH" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert isinstance(data, list), 'Sesiones debe ser lista'
+          assert len(data) > 0, 'Debe haber al menos 1 sesion'
+          s = data[0]
+          assert 'ip_address' in s, 'Falta ip_address'
+          assert 'user_agent' in s, 'Falta user_agent'
+          assert 'created_at' in s, 'Falta created_at'
+          assert 'expires_at' in s, 'Falta expires_at'
+          print(f'PASS — {len(data)} sesiones activas, IP: {s[\"ip_address\"]}')
+          "
+
+          # Logout
+          LOGOUT=$(curl -s -X POST http://localhost:8000/api/auth/logout -H "$AUTH")
+          echo "Logout: $LOGOUT"
+          echo "$LOGOUT" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert data['message'] == 'Sesion cerrada', 'Logout fallo'
+          print('PASS — Logout exitoso')
+          "
+
+      - name: Test 8 — Validacion de inputs
+        run: |
+          # Password muy corto (min 6)
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@test.com","password":"123","nombre":"Test"}')
+          [ "$CODE" = "422" ] && echo "PASS — Password corto rechazado (422)"
+
+          # Email vacio
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"","password":"123456"}')
+          [ "$CODE" = "422" ] && echo "PASS — Email vacio rechazado (422)"
+
+      - name: Test 9 — Rate limiting
+        run: |
+          # Hacer 65 requests rapidos (limite es 60/min)
+          for i in $(seq 1 65); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/plans/)
+            if [ "$CODE" = "429" ]; then
+              echo "PASS — Rate limit activo despues de $i requests (HTTP 429)"
+              exit 0
+            fi
+          done
+          echo "WARN — Rate limit no se activo en 65 requests"
+
+      - name: Resumen de tests
+        if: always()
+        run: |
+          echo "========================================"
+          echo "  Backend Tests completados"
+          echo "  Commit: ${{ github.sha }}"
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "========================================"
+
+  # ══════════════════════════════════════════════════════
+  # JOB 2: Build Frontend
+  # ══════════════════════════════════════════════════════
+  frontend-build:
     name: Frontend — Build
     runs-on: ubuntu-latest
 
@@ -158,13 +308,13 @@ jobs:
         working-directory: web
         run: npm run build
 
-  # ══════════════════════════════════════
+  # ══════════════════════════════════════════════════════
   # JOB 3: Build Docker images
-  # ══════════════════════════════════════
-  docker:
+  # ══════════════════════════════════════════════════════
+  docker-build:
     name: Docker — Build images
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend-tests, frontend-build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
@@ -180,74 +330,103 @@ jobs:
       - name: Verificar imagenes
         run: |
           docker images | grep sponsorship
-          echo "OK — Imagenes Docker construidas"
+          echo "OK — Imagenes construidas"
 
-  # ══════════════════════════════════════
-  # JOB 4: Deploy a produccion (Supabase)
-  # ══════════════════════════════════════
+  # ══════════════════════════════════════════════════════
+  # JOB 4: Deploy a VPS (Hostinger u otro)
+  # ══════════════════════════════════════════════════════
+  #
+  # ┌────────────────────────────────────────────────────┐
+  # │  COMO CONFIGURAR CUANDO TENGAS EL VPS:            │
+  # │                                                    │
+  # │  1. En tu VPS, instalar Docker:                    │
+  # │     curl -fsSL https://get.docker.com | sh         │
+  # │                                                    │
+  # │  2. Clonar el repo en el VPS:                      │
+  # │     git clone https://github.com/Jesus123J/        │
+  # │       sponsorship_mvp.git /app                     │
+  # │                                                    │
+  # │  3. Crear SSH key para GitHub:                     │
+  # │     ssh-keygen -t ed25519 -f deploy_key            │
+  # │     # Copiar deploy_key.pub al VPS:                │
+  # │     #   ~/.ssh/authorized_keys                     │
+  # │     # Copiar deploy_key (privada) a GitHub:        │
+  # │     #   Settings → Secrets → DEPLOY_SSH_KEY        │
+  # │                                                    │
+  # │  4. Agregar estos secrets en GitHub:               │
+  # │     Settings → Secrets and variables → Actions     │
+  # │                                                    │
+  # │     VPS_HOST      = 154.xx.xx.xx (IP del VPS)      │
+  # │     VPS_USER      = root                           │
+  # │     VPS_SSH_KEY   = (contenido de deploy_key)      │
+  # │     VPS_PORT      = 22                             │
+  # │     DB_PASSWORD   = tu_password_produccion         │
+  # │     JWT_SECRET    = tu_secreto_produccion          │
+  # │                                                    │
+  # │  5. En el VPS crear .env:                          │
+  # │     nano /app/.env                                 │
+  # │     DB_HOST=localhost                              │
+  # │     DB_PASSWORD=tu_password                        │
+  # │     JWT_SECRET=tu_secreto                          │
+  # │                                                    │
+  # │  6. Descomentar el job deploy abajo                │
+  # └────────────────────────────────────────────────────┘
+
   deploy:
-    name: Deploy — Produccion
+    name: Deploy — VPS Produccion
     runs-on: ubuntu-latest
-    needs: [docker]
+    needs: [docker-build]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
 
     steps:
-      - name: Checkout codigo
-        uses: actions/checkout@v4
-
-      # ┌─────────────────────────────────────────────────────────┐
-      # │  SUPABASE: Configurar cuando tengas las credenciales   │
-      # │                                                         │
-      # │  Ir a: GitHub repo → Settings → Secrets → Actions      │
-      # │  Agregar estos secrets:                                 │
-      # │                                                         │
-      # │  SUPABASE_URL        = https://xxx.supabase.co          │
-      # │  SUPABASE_ANON_KEY   = eyJ...                           │
-      # │  SUPABASE_SERVICE_KEY = eyJ... (para migraciones)       │
-      # │  SUPABASE_DB_URL     = postgresql://...                 │
-      # │  JWT_SECRET           = tu-secreto-produccion           │
-      # │  DEPLOY_HOST          = IP del servidor                 │
-      # │  DEPLOY_KEY           = SSH key del servidor            │
-      # └─────────────────────────────────────────────────────────┘
-
-      - name: Verificar secrets de Supabase
+      - name: Verificar configuracion de deploy
         run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ]; then
-            echo "⏳ SUPABASE_URL no configurado — deploy pendiente"
-            echo "📋 Configura los secrets en GitHub → Settings → Secrets → Actions"
+          if [ -z "${{ secrets.VPS_HOST }}" ]; then
+            echo "========================================"
+            echo "  Deploy pendiente — VPS no configurado"
+            echo "========================================"
             echo ""
-            echo "Secrets necesarios:"
-            echo "  SUPABASE_URL"
-            echo "  SUPABASE_ANON_KEY"
-            echo "  SUPABASE_SERVICE_KEY"
-            echo "  SUPABASE_DB_URL"
-            echo "  JWT_SECRET"
+            echo "  Cuando tengas tu VPS de Hostinger:"
+            echo ""
+            echo "  1. Agrega estos secrets en GitHub:"
+            echo "     VPS_HOST, VPS_USER, VPS_SSH_KEY"
+            echo "     VPS_PORT, DB_PASSWORD, JWT_SECRET"
+            echo ""
+            echo "  2. Instala Docker en el VPS"
+            echo "  3. Clona el repo en /app"
+            echo "  4. El deploy sera automatico"
+            echo ""
+            echo "========================================"
             exit 0
           fi
-          echo "OK — Secrets configurados"
 
-      - name: Migrar esquema a Supabase
-        if: ${{ secrets.SUPABASE_DB_URL != '' }}
+      # Descomenta esto cuando tengas el VPS:
+      #
+      # - name: Deploy via SSH
+      #   uses: appleboy/ssh-action@v1
+      #   with:
+      #     host: ${{ secrets.VPS_HOST }}
+      #     username: ${{ secrets.VPS_USER }}
+      #     key: ${{ secrets.VPS_SSH_KEY }}
+      #     port: ${{ secrets.VPS_PORT }}
+      #     script: |
+      #       cd /app
+      #       git pull origin main
+      #       docker-compose build --no-cache
+      #       docker-compose up -d
+      #       docker-compose ps
+      #       echo "Deploy completado: $(date)"
+
+      - name: Resumen
         run: |
-          # Instalar psql
-          sudo apt-get install -y postgresql-client
-
-          # Ejecutar migraciones
-          psql "${{ secrets.SUPABASE_DB_URL }}" -f sql/schema.sql
-          psql "${{ secrets.SUPABASE_DB_URL }}" -f sql/tabla_sesiones.sql
-          psql "${{ secrets.SUPABASE_DB_URL }}" -f sql/indices_optimizacion.sql
-          echo "OK — Esquema migrado a Supabase"
-
-      - name: Resumen del deploy
-        run: |
-          echo "════════════════════════════════════════"
-          echo "  CI/CD Pipeline completado"
-          echo "════════════════════════════════════════"
-          echo "  Commit:   ${{ github.sha }}"
-          echo "  Branch:   ${{ github.ref_name }}"
-          echo "  Actor:    ${{ github.actor }}"
-          echo "  Backend:  ✅ Tests passed"
-          echo "  Frontend: ✅ Build passed"
-          echo "  Docker:   ✅ Images built"
-          echo "════════════════════════════════════════"
+          echo "========================================"
+          echo "  CI/CD Pipeline — ${{ github.ref_name }}"
+          echo "========================================"
+          echo "  Commit:    ${{ github.sha }}"
+          echo "  Actor:     ${{ github.actor }}"
+          echo "  Tests:     OK"
+          echo "  Build:     OK"
+          echo "  Docker:    OK"
+          echo "  Deploy:    Pendiente (configurar VPS)"
+          echo "========================================"
