@@ -3,14 +3,13 @@ FROM python:3.12.0-slim
 
 WORKDIR /app
 
-# Dependencias del sistema para OpenCV
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 ffmpeg curl \
+# curl para healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar dependencias Python
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+# Instalar solo dependencias de la API (sin ML pesado)
+COPY requirements-api.txt .
+RUN pip install --no-cache-dir -r requirements-api.txt
 
 # Copiar codigo (sin data/, se monta como volumen)
 COPY api/ ./api/

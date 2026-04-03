@@ -1,13 +1,40 @@
 /**
  * Cliente API — conecta el frontend con FastAPI backend
- * Base URL: http://localhost:8000/api
+ * Envia JWT token en cada request autenticado
  */
+
+import { getToken, logout } from './auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'
 
-async function fetchAPI<T = any>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`)
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
+async function fetchAPI<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> || {}),
+  }
+
+  // Agregar token JWT si existe
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  })
+
+  // Si el token expiro, hacer logout
+  if (res.status === 401) {
+    logout()
+    throw new Error('Sesion expirada')
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `Error ${res.status}` }))
+    throw new Error(err.detail || `API error: ${res.status}`)
+  }
+
   return res.json()
 }
 
@@ -90,7 +117,7 @@ export async function getLeagueDetections(filters: {
   if (filters.position_type) params.set('position_type', filters.position_type)
   if (filters.match_period) params.set('match_period', filters.match_period)
   const q = params.toString() ? `?${params}` : ''
-  return fetchAPI<any[]>(`/detections/league${q}`)
+  return fetchAPI<any>(`/detections/league${q}`)
 }
 
 export async function getPropertyDetections(entityId: string, filters: {
@@ -101,7 +128,7 @@ export async function getPropertyDetections(entityId: string, filters: {
   if (filters.match_id) params.set('match_id', filters.match_id)
   if (filters.position_type) params.set('position_type', filters.position_type)
   const q = params.toString() ? `?${params}` : ''
-  return fetchAPI<any[]>(`/detections/property/${entityId}${q}`)
+  return fetchAPI<any>(`/detections/property/${entityId}${q}`)
 }
 
 export async function getBrandDetections(sponsorId: string, filters: {
@@ -114,7 +141,7 @@ export async function getBrandDetections(sponsorId: string, filters: {
   if (filters.entity_id) params.set('entity_id', filters.entity_id)
   if (filters.position_type) params.set('position_type', filters.position_type)
   const q = params.toString() ? `?${params}` : ''
-  return fetchAPI<any[]>(`/detections/brand/${sponsorId}${q}`)
+  return fetchAPI<any>(`/detections/brand/${sponsorId}${q}`)
 }
 
 export async function getMenciones(sponsorId?: string, matchId?: string) {

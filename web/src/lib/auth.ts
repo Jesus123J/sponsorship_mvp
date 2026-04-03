@@ -1,5 +1,5 @@
 /**
- * Manejo de autenticacion — login, logout, sesion
+ * Manejo de autenticacion — login, logout, sesion, JWT
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'
@@ -23,9 +23,23 @@ export async function loginUser(email: string, password: string): Promise<User> 
     const err = await res.json().catch(() => ({ detail: 'Error de conexion' }))
     throw new Error(err.detail || 'Error al iniciar sesion')
   }
-  const user = await res.json()
-  saveSession(user)
-  return user
+  const data = await res.json()
+
+  // Guardar token y usuario por separado
+  saveToken(data.access_token)
+  saveSession(data.user)
+  return data.user
+}
+
+export function saveToken(token: string) {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('token', token)
+  }
+}
+
+export function getToken(): string | null {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem('token')
 }
 
 export function saveSession(user: User) {
@@ -44,6 +58,7 @@ export function getSession(): User | null {
 export function logout() {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('user')
+    localStorage.removeItem('token')
     window.location.href = '/login'
   }
 }

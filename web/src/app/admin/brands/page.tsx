@@ -28,7 +28,7 @@ export default function BrandView() {
       getMenciones(selectedSponsor, filters.matchId || undefined),
     ])
       .then(([dets, mencs]) => {
-        setData(dets.map(d => ({ entity: d.entity_id, position: d.position_type, localidad: d.localidad || '', smv: d.smv, count: d.detecciones })))
+        setData(dets.map((d: any) => ({ entity: d.entity_id, position: d.position_type, localidad: d.localidad || '', smv: d.smv, count: d.detecciones })))
         setMenciones(mencs)
         setLoading(false)
       })

@@ -2,10 +2,11 @@
 import bcrypt
 from api.database import fetch_one, execute
 from api.core.security import create_access_token
+from api.controllers import sessions_controller as sessions
 
 
-def login(email: str, password: str) -> dict:
-    """Valida credenciales y retorna token + datos del usuario."""
+def login(email: str, password: str, ip: str = "", user_agent: str = "") -> dict:
+    """Valida credenciales, crea sesion en BD y retorna token."""
     user = fetch_one(
         "SELECT id, email, password_hash, nombre, rol, sponsor_id, activo "
         "FROM usuarios WHERE email = %s",
@@ -36,6 +37,9 @@ def login(email: str, password: str) -> dict:
         "sponsor_id": user["sponsor_id"],
     })
 
+    # Registrar sesion en BD
+    sessions.create_session(user["id"], token, ip, user_agent)
+
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -48,6 +52,11 @@ def login(email: str, password: str) -> dict:
             "suscripcion": sub,
         },
     }
+
+
+def logout(token: str):
+    """Cierra la sesion en BD."""
+    sessions.close_session(token)
 
 
 def register(email: str, password: str, nombre: str, sponsor_id: str = None) -> dict:
