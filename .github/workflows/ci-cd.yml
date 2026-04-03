@@ -58,10 +58,22 @@ jobs:
         run: |
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/schema.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/seed_data.sql
-          mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/seed_usuarios.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/tabla_sesiones.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/indices_optimizacion.sql
-          echo "BD de test lista"
+
+          # Crear usuario admin de test con hash generado aqui
+          HASH=$(python -c "import bcrypt; print(bcrypt.hashpw(b'demo2025', bcrypt.gensalt()).decode())")
+          mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp -e "
+            INSERT INTO planes (nombre, precio_mensual, precio_anual, max_marcas, max_partidos_mes, incluye_audio, incluye_social, incluye_api, incluye_pdf) VALUES
+            ('Starter', 2500, 24000, 1, 2, 0, 0, 0, 1),
+            ('Professional', 6500, 62400, 3, 99, 1, 0, 0, 1),
+            ('Enterprise', 15000, 144000, 99, 99, 1, 1, 1, 1);
+
+            INSERT INTO usuarios (email, password_hash, nombre, rol, sponsor_id) VALUES
+            ('admin@sponsorshipmvp.pe', '$HASH', 'Administrador Liga 1', 'admin', NULL),
+            ('cliente@test.pe', '$HASH', 'Cliente Test', 'client', 'apuesta_total');
+          "
+          echo "BD de test lista con usuario admin"
 
       - name: Test 1 — Imports y estructura
         run: |
