@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx next:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"from api.main import app; print\\(''API imports OK''\\)\")",
+      "Read(//c/Users/Jesus Gutierrez/Desktop/vania/sponsorship_mvp/**)",
+      "Bash(python -c \"from config.db import get_connection; c = get_connection\\(\\); print\\(''MySQL OK:'', c.server_host\\); c.close\\(\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(uvicorn api.main:app --reload --port 8000)",
+      "Bash(python -c \"from api.main import app; print\\(''API OK - routers:'', [r.path for r in app.routes][:5]\\)\")",
+      "Bash(python -c \"from api.main import app; print\\(''API OK''\\)\")",
+      "Bash(pip show:*)",
+      "Bash(grep -rn \"from ''''@/\\\\|import.*from ''''@/\" src/ --include=\"*.tsx\" --include=\"*.ts\")",
+      "Bash(ffmpeg -version)",
+      "Bash(python -c \"from api.main import app; print\\(''''API OK''''\\)\")"
+    ]
+  }
+}

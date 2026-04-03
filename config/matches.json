@@ -1,0 +1,40 @@
+{
+  "alianza_vs_u_apertura_2025_f7": {
+    "url_youtube": "https://www.youtube.com/watch?v=S1XtXjhltM4",
+    "equipo_local": "alianza_lima",
+    "equipo_visitante": "universitario",
+    "torneo": "apertura",
+    "jornada": 7,
+    "match_type": "clasico",
+    "fecha": "2025-04-05",
+    "canal": "l1max",
+    "resultado": "1-1",
+    "minutos_gol": [],
+    "timestamp_pitido_inicial": 0,
+    "duracion_primera_mitad_seg": 0,
+    "duracion_entretiempo_seg": 0,
+    "timestamps_comerciales": [],
+    "audiencia_estimada": 850000,
+    "model_version": "yolo_v1.0",
+    "color_override": {}
+  },
+  "cristal_vs_u_clausura_2025": {
+    "url_youtube": "https://www.youtube.com/watch?v=LoOuNhr8Hs",
+    "equipo_local": "sporting_cristal",
+    "equipo_visitante": "universitario",
+    "torneo": "clausura",
+    "jornada": null,
+    "match_type": "regular",
+    "fecha": null,
+    "canal": "l1max",
+    "resultado": "0-1",
+    "minutos_gol": [],
+    "timestamp_pitido_inicial": 0,
+    "duracion_primera_mitad_seg": 0,
+    "duracion_entretiempo_seg": 0,
+    "timestamps_comerciales": [],
+    "audiencia_estimada": 600000,
+    "model_version": "yolo_v1.0",
+    "color_override": {}
+  }
+}
