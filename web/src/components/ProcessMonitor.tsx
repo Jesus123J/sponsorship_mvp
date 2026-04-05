@@ -14,6 +14,7 @@ interface ProcessInfo {
   error?: string | null
   finished_at?: string | null
   match_id?: string
+  download_url?: string | null
 }
 
 const ENDPOINTS = [
@@ -48,20 +49,17 @@ export default function ProcessMonitor() {
 
           const prev = stableProcesses.current[ep.key]
 
-          // Si el backend dice que está corriendo → actualizar siempre
           if (data.running) {
             stableProcesses.current[ep.key] = {
               key: ep.key, label: ep.label, icon: ep.icon,
               running: true,
               progress: data.progress || 'Procesando...',
               percent: data.percent,
-              error: null,
-              finished_at: null,
+              error: null, finished_at: null,
               match_id: data.match_id,
+              download_url: data.download_url,
             }
-          }
-          // Si tiene error → mostrar error
-          else if (data.error) {
+          } else if (data.error) {
             stableProcesses.current[ep.key] = {
               key: ep.key, label: ep.label, icon: ep.icon,
               running: false,
@@ -70,10 +68,9 @@ export default function ProcessMonitor() {
               error: data.error,
               finished_at: data.finished_at,
               match_id: data.match_id,
+              download_url: data.download_url,
             }
-          }
-          // Si terminó (tiene finished_at o progress con contenido) → marcar completado
-          else if (data.finished_at || (data.progress && data.progress.length > 0)) {
+          } else if (data.finished_at || (data.progress && data.progress.length > 0)) {
             stableProcesses.current[ep.key] = {
               key: ep.key, label: ep.label, icon: ep.icon,
               running: false,
@@ -82,11 +79,10 @@ export default function ProcessMonitor() {
               error: null,
               finished_at: data.finished_at || 'done',
               match_id: data.match_id,
+              download_url: data.download_url,
             }
-          }
-          // Backend vacío pero ya teníamos datos → NO TOCAR (mantener lo que hay)
-          else if (prev) {
-            // No hacer nada — mantener el estado anterior
+          } else if (prev) {
+            // Backend vacío — mantener estado anterior
           }
         } catch {
           // No borrar datos existentes si falla la peticion
@@ -199,6 +195,32 @@ export default function ProcessMonitor() {
 
               {proc.match_id && (
                 <p className="text-xs text-gray-500 mt-0.5">{proc.match_id}</p>
+              )}
+
+              {/* Boton de descarga para ZIP completado */}
+              {proc.key === 'zip' && !proc.running && !proc.error && proc.download_url && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const token = getToken()
+                      const url = `${API}${proc.download_url!.replace('/api', '')}`
+                      const res = await fetch(url, { headers: token ? { 'Authorization': `Bearer ${token}` } : {} })
+                      if (!res.ok) throw new Error('Error al descargar')
+                      const blob = await res.blob()
+                      const a = document.createElement('a')
+                      a.href = URL.createObjectURL(blob)
+                      a.download = proc.download_url!.split('file=')[1] || 'frames.zip'
+                      a.click()
+                      URL.revokeObjectURL(a.href)
+                      dismiss(proc.key)
+                    } catch { }
+                  }}
+                  className="mt-2 w-full px-3 py-2 bg-emerald-500 text-white rounded-lg text-xs font-medium hover:bg-emerald-600 transition-colors flex items-center justify-center gap-1.5">
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                  Descargar ZIP
+                </button>
               )}
             </div>
           ))}
