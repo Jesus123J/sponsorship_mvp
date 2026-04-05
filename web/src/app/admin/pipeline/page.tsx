@@ -64,13 +64,25 @@ export default function PipelinePage() {
 
   const startPoll = (url: string, setter: (s: any) => void, onDone?: () => void) => {
     if (pollRef.current) clearInterval(pollRef.current)
-    pollRef.current = setInterval(async () => {
+
+    const doPoll = async () => {
       try {
         const s = await authFetch(url).then(r => r.json())
         setter(s)
-        if (!s.running) { clearInterval(pollRef.current); onDone?.() }
+        if (!s.running) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+          onDone?.()
+        }
       } catch {}
-    }, 1500)
+    }
+
+    doPoll() // Poll inmediato
+    pollRef.current = setInterval(doPoll, 2000)
+
+    // Re-poll al volver a la pestaña
+    const onVisible = () => { if (!document.hidden && pollRef.current) doPoll() }
+    document.addEventListener('visibilitychange', onVisible)
   }
 
   // ==================== YOUTUBE ====================
@@ -83,8 +95,12 @@ export default function PipelinePage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      startPoll(`${API}/training/download-youtube/status`, setYtStatus, loadVideos)
-    } catch (err: any) { setYtStatus({ error: err.message }) }
+      setYtStatus({ running: true, progress: 'Conectando con YouTube...', match_id: ytMatchId })
+      startPoll(`${API}/training/download-youtube/status`, (s) => {
+        setYtStatus((prev: any) => ({ ...prev, ...s }))
+        if (!s.running && !s.error) loadVideos()
+      })
+    } catch (err: any) { setYtStatus({ running: false, error: err.message, match_id: ytMatchId }) }
   }
 
   // ==================== UPLOAD VIDEO ====================
@@ -105,23 +121,29 @@ export default function PipelinePage() {
 
   // ==================== EXTRACT FRAMES ====================
   const extractFrames = async (matchId: string) => {
-    setExtractStatus({ running: true, progress: 'Iniciando...', percent: 0, log: [] })
+    setExtractStatus({ running: true, progress: 'Iniciando extraccion...', percent: 0, match_id: matchId })
     try {
       const res = await authFetch(`${API}/training/extract-frames?match_id=${matchId}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
       setActiveStep('frames')
-      startPoll(`${API}/training/extract-frames/status`, setExtractStatus)
-    } catch (err: any) { setExtractStatus({ error: err.message }) }
+      startPoll(`${API}/training/extract-frames/status`, (s) => {
+        setExtractStatus((prev: any) => ({ ...prev, ...s, match_id: matchId }))
+      })
+    } catch (err: any) { setExtractStatus({ running: false, error: err.message, match_id: matchId }) }
   }
 
   // ==================== PREPARE ZIP ====================
   const prepareZip = async (matchId: string, sample: number) => {
-    setZipStatus({ running: true, progress: 'Preparando...', percent: 0, log: [] })
+    if (!matchId) return
+    setZipStatus({ running: true, progress: `Preparando ZIP (${sample > 0 ? sample + ' frames' : 'todos'})...`, percent: 0, match_id: matchId })
     try {
       const res = await authFetch(`${API}/training/frames/${matchId}/prepare-zip?sample=${sample}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
-      startPoll(`${API}/training/frames/${matchId}/prepare-zip/status`, setZipStatus)
-    } catch (err: any) { setZipStatus({ error: err.message }) }
+      startPoll(`${API}/training/frames/${matchId}/prepare-zip/status`, (s) => {
+        // Mantener match_id y nunca setear null
+        setZipStatus((prev: any) => ({ ...prev, ...s, match_id: matchId }))
+      })
+    } catch (err: any) { setZipStatus({ running: false, error: err.message, match_id: matchId }) }
   }
 
   // ==================== UPLOAD DATASET ====================
@@ -142,15 +164,20 @@ export default function PipelinePage() {
 
   // ==================== TRAIN ====================
   const startTraining = async () => {
+    setTrainingStatus({ running: true, progress: 'Iniciando entrenamiento...' })
     try {
       const res = await authFetch(`${API}/training/train?epochs=${trainConfig.epochs}&imgsz=${trainConfig.imgsz}&batch=${trainConfig.batch}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
-      startPoll(`${API}/training/train/status`, setTrainingStatus, loadModelInfo)
-    } catch (err: any) { setTrainingStatus({ error: err.message }) }
+      startPoll(`${API}/training/train/status`, (s) => {
+        setTrainingStatus((prev: any) => ({ ...prev, ...s }))
+        if (!s.running && !s.error) loadModelInfo()
+      })
+    } catch (err: any) { setTrainingStatus({ running: false, error: err.message }) }
   }
 
   // ==================== RUN PIPELINE ====================
   const runPipeline = async (matchId: string) => {
+    setPipelineStatus({ running: true, progress: 'Iniciando pipeline...', match_id: matchId })
     try {
       const res = await authFetch(`${API}/training/run`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -158,8 +185,10 @@ export default function PipelinePage() {
       })
       if (!res.ok) throw new Error((await res.json()).detail)
       setActiveStep('run')
-      startPoll(`${API}/training/pipeline/status`, setPipelineStatus)
-    } catch (err: any) { setPipelineStatus({ error: err.message }) }
+      startPoll(`${API}/training/pipeline/status`, (s) => {
+        setPipelineStatus((prev: any) => ({ ...prev, ...s, match_id: matchId }))
+      })
+    } catch (err: any) { setPipelineStatus({ running: false, error: err.message, match_id: matchId }) }
   }
 
   const steps = [
