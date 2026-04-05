@@ -2,7 +2,7 @@
 import os
 import hashlib
 import time
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal
@@ -170,8 +170,10 @@ def zip_status(match_id: str, current_user: dict = Depends(require_admin)):
 
 
 @router.get("/frames/{match_id}/download-ready")
-def download_ready(match_id: str, file: str, current_user: dict = Depends(require_admin)):
+def download_ready(match_id: str, file: str, background_tasks: BackgroundTasks, current_user: dict = Depends(require_admin)):
     path = ctrl.get_zip_path(file)
     if not path:
         raise HTTPException(status_code=404, detail="ZIP no encontrado")
+    # Borrar ZIP automaticamente despues de enviarlo
+    background_tasks.add_task(ctrl.delete_zip, path)
     return FileResponse(path, media_type='application/zip', filename=file)

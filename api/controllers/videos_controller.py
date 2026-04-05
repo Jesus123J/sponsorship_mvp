@@ -297,3 +297,14 @@ def get_zip_status() -> dict:
 def get_zip_path(filename: str) -> str | None:
     zip_path = os.path.join(DATA_DIR, filename)
     return zip_path if os.path.exists(zip_path) else None
+
+
+def delete_zip(path: str):
+    """Borra el ZIP despues de que el usuario lo descargo."""
+    import time
+    time.sleep(5)  # Esperar a que termine la descarga
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
