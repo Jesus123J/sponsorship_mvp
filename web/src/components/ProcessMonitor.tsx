@@ -203,15 +203,17 @@ export default function ProcessMonitor() {
                   onClick={async () => {
                     try {
                       const token = getToken()
-                      const url = `${API}${proc.download_url!.replace('/api', '')}`
-                      const res = await fetch(url, { headers: token ? { 'Authorization': `Bearer ${token}` } : {} })
-                      if (!res.ok) throw new Error('Error al descargar')
-                      const blob = await res.blob()
-                      const a = document.createElement('a')
-                      a.href = URL.createObjectURL(blob)
-                      a.download = proc.download_url!.split('file=')[1] || 'frames.zip'
-                      a.click()
-                      URL.revokeObjectURL(a.href)
+                      const file = proc.download_url!.split('file=')[1] || ''
+                      const matchId = file.replace('frames_', '').replace('.zip', '').replace(/_sample_\d+/, '')
+                      // Obtener token temporal para descarga directa
+                      const tokenRes = await fetch(
+                        `${API}/training/frames/${matchId}/download-token?file=${file}`,
+                        { headers: token ? { 'Authorization': `Bearer ${token}` } : {} }
+                      )
+                      if (!tokenRes.ok) throw new Error('Error al generar token')
+                      const tokenData = await tokenRes.json()
+                      // Abrir descarga directa en nueva ventana
+                      window.open(`${API}${tokenData.url.replace('/api', '')}`, '_blank')
                       dismiss(proc.key)
                     } catch { }
                   }}

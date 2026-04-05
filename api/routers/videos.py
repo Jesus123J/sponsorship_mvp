@@ -169,11 +169,30 @@ def zip_status(match_id: str, current_user: dict = Depends(require_admin)):
     return ctrl.get_zip_status()
 
 
-@router.get("/frames/{match_id}/download-ready")
-def download_ready(match_id: str, file: str, background_tasks: BackgroundTasks, current_user: dict = Depends(require_admin)):
+@router.get("/frames/{match_id}/download-token")
+def get_download_token(match_id: str, file: str, current_user: dict = Depends(require_admin)):
+    """Genera token temporal para descargar ZIP sin JWT en header."""
     path = ctrl.get_zip_path(file)
     if not path:
         raise HTTPException(status_code=404, detail="ZIP no encontrado")
-    # Borrar ZIP automaticamente despues de enviarlo
+    token = hashlib.sha256(f"zip-{file}-{time.time()}".encode()).hexdigest()[:32]
+    _video_tokens[token] = {"file": file, "expires": time.time() + 3600}
+    return {"token": token, "url": f"/api/training/frames/{match_id}/download-ready?file={file}&token={token}"}
+
+
+@router.get("/frames/{match_id}/download-ready")
+def download_ready(match_id: str, file: str, background_tasks: BackgroundTasks, token: str = None):
+    """Descarga ZIP con token temporal (no necesita JWT)."""
+    if not token or token not in _video_tokens:
+        raise HTTPException(status_code=403, detail="Token requerido")
+    token_data = _video_tokens[token]
+    if token_data.get("file") != file or token_data["expires"] < time.time():
+        raise HTTPException(status_code=403, detail="Token invalido o expirado")
+
+    path = ctrl.get_zip_path(file)
+    if not path:
+        raise HTTPException(status_code=404, detail="ZIP no encontrado")
+
+    del _video_tokens[token]
     background_tasks.add_task(ctrl.delete_zip, path)
     return FileResponse(path, media_type='application/zip', filename=file)

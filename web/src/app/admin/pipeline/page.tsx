@@ -393,15 +393,12 @@ export default function PipelinePage() {
                     <button
                       onClick={async () => {
                         try {
-                          const url = `${API}${zipStatus.download_url.replace('/api', '')}`
-                          const res = await authFetch(url)
-                          if (!res.ok) throw new Error('Error al descargar')
-                          const blob = await res.blob()
-                          const a = document.createElement('a')
-                          a.href = URL.createObjectURL(blob)
-                          a.download = zipStatus.download_url.split('file=')[1] || 'frames.zip'
-                          a.click()
-                          URL.revokeObjectURL(a.href)
+                          const file = zipStatus.download_url.split('file=')[1] || ''
+                          const matchId = zipStatus.match_id || extractStatus?.match_id || ''
+                          const res = await authFetch(`${API}/training/frames/${matchId}/download-token?file=${file}`)
+                          if (!res.ok) throw new Error('Error al generar token')
+                          const data = await res.json()
+                          window.open(`${API}${data.url.replace('/api', '')}`, '_blank')
                         } catch (err: any) { alert(err.message) }
                       }}
                       className="inline-flex items-center gap-2 mt-3 px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 transition-colors">
