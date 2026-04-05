@@ -47,25 +47,46 @@ export default function ProcessMonitor() {
           const data = await res.json()
 
           const prev = stableProcesses.current[ep.key]
-          const hasNewData = data.running || data.error || data.finished_at || data.progress
 
-          if (hasNewData) {
+          // Si el backend dice que está corriendo → actualizar siempre
+          if (data.running) {
             stableProcesses.current[ep.key] = {
-              key: ep.key,
-              label: ep.label,
-              icon: ep.icon,
-              running: data.running || false,
+              key: ep.key, label: ep.label, icon: ep.icon,
+              running: true,
+              progress: data.progress || 'Procesando...',
+              percent: data.percent,
+              error: null,
+              finished_at: null,
+              match_id: data.match_id,
+            }
+          }
+          // Si tiene error → mostrar error
+          else if (data.error) {
+            stableProcesses.current[ep.key] = {
+              key: ep.key, label: ep.label, icon: ep.icon,
+              running: false,
               progress: data.progress || '',
               percent: data.percent,
               error: data.error,
               finished_at: data.finished_at,
               match_id: data.match_id,
             }
-          } else if (prev && prev.finished_at && !prev.running) {
-            // Mantener el estado "completado" — no borrar con datos vacios
-          } else if (prev && !data.running) {
-            // Proceso terminó sin finished_at — limpiar
-            delete stableProcesses.current[ep.key]
+          }
+          // Si terminó (tiene finished_at o progress con contenido) → marcar completado
+          else if (data.finished_at || (data.progress && data.progress.length > 0)) {
+            stableProcesses.current[ep.key] = {
+              key: ep.key, label: ep.label, icon: ep.icon,
+              running: false,
+              progress: data.progress || 'Completado',
+              percent: 100,
+              error: null,
+              finished_at: data.finished_at || 'done',
+              match_id: data.match_id,
+            }
+          }
+          // Backend vacío pero ya teníamos datos → NO TOCAR (mantener lo que hay)
+          else if (prev) {
+            // No hacer nada — mantener el estado anterior
           }
         } catch {
           // No borrar datos existentes si falla la peticion
