@@ -105,18 +105,20 @@ export default function AdminSidebar() {
         </div>
 
         <div className="pt-4">
-          <p className="px-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Accesos rapidos</p>
-          <Link href="/client" className="sidebar-link text-slate-400 hover:text-white">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-            </svg>
-            Vista Cliente
-          </Link>
-          <Link href="/plans" className="sidebar-link text-slate-400 hover:text-white">
+          <p className="px-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Negocio</p>
+          <Link href="/admin/plans"
+            className={`sidebar-link ${pathname === '/admin/plans' ? 'active bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`}>
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z" />
             </svg>
-            Planes y Precios
+            Planes y Suscripciones
+          </Link>
+          <Link href="/admin/sessions"
+            className={`sidebar-link ${pathname === '/admin/sessions' ? 'active bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`}>
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
+            </svg>
+            Sesiones activas
           </Link>
         </div>
       </nav>

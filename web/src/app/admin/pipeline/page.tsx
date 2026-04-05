@@ -28,6 +28,7 @@ export default function PipelinePage() {
   const [ytStatus, setYtStatus] = useState<any>(null)
   const [extractStatus, setExtractStatus] = useState<any>(null)
   const [zipStatus, setZipStatus] = useState<any>(null)
+  const [existingFrames, setExistingFrames] = useState<any>(null)
   const [previewVideo, setPreviewVideo] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [labelGuide, setLabelGuide] = useState<any>(null)
@@ -42,7 +43,22 @@ export default function PipelinePage() {
   }, [])
 
   const loadModelInfo = () => authFetch(`${API}/training/model/info`).then(r => r.json()).then(setModelInfo).catch(() => {})
-  const loadVideos = () => authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+  const loadVideos = () => authFetch(`${API}/training/videos`).then(r => r.json()).then(list => {
+    setVideos(list)
+    // Cargar frames existentes de cada video
+    if (Array.isArray(list)) {
+      list.forEach((v: any) => {
+        authFetch(`${API}/training/frames/${v.match_id}?page=1&per_page=1`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.total > 0) {
+              setExistingFrames((prev: any) => ({ ...prev, [v.match_id]: data.total }))
+            }
+          })
+          .catch(() => {})
+      })
+    }
+  }).catch(() => {})
   const loadMatches = () => authFetch(`${API}/matches/`).then(r => r.json()).then(setMatches).catch(() => {})
   const loadLabelGuide = () => authFetch(`${API}/settings/labeling-guide`).then(r => r.json()).then(setLabelGuide).catch(() => {})
 
@@ -242,7 +258,14 @@ export default function PipelinePage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-900">{v.match_id}</p>
-                      <p className="text-xs text-gray-400">{v.size_mb} MB</p>
+                      <p className="text-xs text-gray-400">
+                        {v.size_mb} MB
+                        {existingFrames?.[v.match_id] && (
+                          <span className="ml-2 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full font-medium">
+                            {existingFrames[v.match_id].toLocaleString()} frames
+                          </span>
+                        )}
+                      </p>
                     </div>
                     <div className="flex gap-2">
                       <button onClick={async () => {
@@ -435,9 +458,40 @@ export default function PipelinePage() {
             </>
           )}
 
+          {/* Mostrar frames existentes si no hay extraccion reciente */}
           {!extractStatus && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 text-center">
-              <p className="text-sm text-amber-800">Primero sube un video y dale &quot;Extraer frames&quot; en el paso 1.</p>
+            <div>
+              {existingFrames && Object.keys(existingFrames).length > 0 ? (
+                <div className="space-y-4">
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5">
+                    <p className="text-sm font-medium text-emerald-800 mb-3">Frames ya extraidos</p>
+                    <div className="space-y-2">
+                      {Object.entries(existingFrames).map(([matchId, count]: [string, any]) => (
+                        <div key={matchId} className="flex items-center justify-between bg-white rounded-lg px-4 py-3 border border-emerald-100">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">{matchId}</p>
+                            <p className="text-xs text-gray-400">{count.toLocaleString()} frames disponibles</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <button onClick={() => {
+                              setExtractStatus({ finished_at: true, frames: count, duracion_seg: 0, fps_video: 0 })
+                              setSelectedMatch(matchId)
+                            }}
+                              className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-700">
+                              Usar estos frames
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-400 text-center">O ve al paso 1 para extraer frames de otro video</p>
+                </div>
+              ) : (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 text-center">
+                  <p className="text-sm text-amber-800">Primero sube un video y dale &quot;Extraer frames&quot; en el paso 1.</p>
+                </div>
+              )}
             </div>
           )}
         </div>
