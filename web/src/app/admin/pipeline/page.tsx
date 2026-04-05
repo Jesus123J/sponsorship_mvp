@@ -474,7 +474,7 @@ export default function PipelinePage() {
                           </div>
                           <div className="flex gap-2">
                             <button onClick={() => {
-                              setExtractStatus({ finished_at: true, frames: count, duracion_seg: 0, fps_video: 0 })
+                              setExtractStatus({ finished_at: true, frames: count, duracion_seg: 0, fps_video: 0, match_id: matchId })
                               setSelectedMatch(matchId)
                             }}
                               className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-700">
