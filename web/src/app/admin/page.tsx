@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { getStats, getTopSponsors } from '@/lib/api'
-import { getMatches } from '@/lib/api'
+import { getStats, getTopSponsors, getMatches } from '@/lib/api'
+import ErrorAlert from '@/components/ErrorAlert'
 import Link from 'next/link'
 
 export default function AdminDashboard() {
@@ -9,8 +9,11 @@ export default function AdminDashboard() {
   const [recentMatches, setRecentMatches] = useState<any[]>([])
   const [topSponsors, setTopSponsors] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true)
+    setError(null)
     Promise.all([getStats(), getTopSponsors(5), getMatches()])
       .then(([s, top, matches]) => {
         setStats(s)
@@ -18,8 +21,10 @@ export default function AdminDashboard() {
         setRecentMatches(matches.slice(0, 5))
         setLoading(false)
       })
-      .catch(() => setLoading(false))
-  }, [])
+      .catch((e) => { setError(e.message); setLoading(false) })
+  }
+
+  useEffect(() => { loadData() }, [])
 
   const fmt = (n: number) => `S/. ${n.toLocaleString('es-PE', { maximumFractionDigits: 0 })}`
 
@@ -29,6 +34,8 @@ export default function AdminDashboard() {
     { label: 'Sponsors activos', value: stats.sponsors, icon: '\u{1F3F7}', color: 'from-purple-500 to-purple-600' },
     { label: 'SMV total generado', value: fmt(stats.smv_total), icon: '\u{1F4B0}', color: 'from-orange-500 to-orange-600' },
   ]
+
+  if (error) return <ErrorAlert message={error} onRetry={loadData} />
 
   return (
     <div>
@@ -59,6 +66,8 @@ export default function AdminDashboard() {
           <div className="divide-y divide-gray-50">
             {loading ? (
               <div className="px-6 py-8 text-center text-gray-400">Cargando...</div>
+            ) : topSponsors.length === 0 ? (
+              <div className="px-6 py-8 text-center text-gray-400">No hay datos de sponsors</div>
             ) : topSponsors.map((s, i) => (
               <div key={s.sponsor_id} className="px-6 py-3 flex items-center justify-between hover:bg-gray-50">
                 <div className="flex items-center gap-3">

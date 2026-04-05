@@ -1,5 +1,4 @@
-# Dependencias SOLO para el contenedor de la API
-# (sin ultralytics, whisper, opencv que son para el pipeline local)
+# Dependencias para el contenedor de la API
 
 # --- Base de datos ---
 mysql-connector-python>=8.0
@@ -13,3 +12,7 @@ bcrypt>=4.1
 python-jose[cryptography]>=3.3
 python-multipart>=0.0.6
 pyyaml>=6.0
+
+# --- Video processing ---
+yt-dlp>=2024.1
+opencv-python-headless>=4.8

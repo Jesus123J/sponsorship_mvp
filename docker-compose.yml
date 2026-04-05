@@ -17,8 +17,8 @@ services:
       - "8000:8000"
     environment:
       ENV: production
-      # Conexion a tu MySQL LOCAL (tu IP de red local)
-      DB_HOST: ${DB_HOST:-192.168.1.10}
+      # Conexion a tu MySQL LOCAL (host.docker.internal = tu PC siempre)
+      DB_HOST: ${DB_HOST:-host.docker.internal}
       DB_USER: ${DB_USER:-root}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME:-sponsorship_mvp}

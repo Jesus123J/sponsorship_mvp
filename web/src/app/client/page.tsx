@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { getSponsors, getSponsorSummary, getSponsorByMatch, getSponsorByPosition } from '@/lib/api'
 import { getSession } from '@/lib/auth'
+import ErrorAlert from '@/components/ErrorAlert'
 import Link from 'next/link'
 
 export default function ClientDashboard() {
@@ -12,24 +13,25 @@ export default function ClientDashboard() {
   const [byMatch, setByMatch] = useState<any[]>([])
   const [byPosition, setByPosition] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const user = getSession()
 
   useEffect(() => {
     getSponsors().then(list => {
       setSponsors(list)
-      // Si el usuario tiene sponsor_id asignado, seleccionarlo automaticamente
       if (user?.sponsor_id) {
         setSelectedSponsor(user.sponsor_id)
         const found = list.find((s: any) => s.sponsor_id === user.sponsor_id)
         if (found) setSponsorName(found.nombre)
       }
-    }).catch(() => {})
+    }).catch((e) => setError(e.message))
   }, [])
 
-  useEffect(() => {
+  const loadData = () => {
     if (!selectedSponsor) { setLoading(false); return }
     setLoading(true)
+    setError(null)
     Promise.all([
       getSponsorSummary(selectedSponsor),
       getSponsorByMatch(selectedSponsor),
@@ -41,8 +43,10 @@ export default function ClientDashboard() {
         setByPosition(positions)
         setLoading(false)
       })
-      .catch(() => setLoading(false))
-  }, [selectedSponsor])
+      .catch((e) => { setError(e.message); setLoading(false) })
+  }
+
+  useEffect(() => { loadData() }, [selectedSponsor])
 
   const fmt = (n: number) => `S/. ${n.toLocaleString('es-PE', { maximumFractionDigits: 0 })}`
 
@@ -56,6 +60,8 @@ export default function ClientDashboard() {
 
   // Si es admin, puede ver cualquier sponsor. Si es client, solo ve el suyo.
   const isAdmin = user?.rol === 'admin'
+
+  if (error) return <ErrorAlert message={error} onRetry={loadData} />
 
   return (
     <div>

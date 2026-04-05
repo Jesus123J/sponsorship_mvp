@@ -3,8 +3,9 @@ FROM python:3.12.0-slim
 
 WORKDIR /app
 
-# curl para healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# curl + OpenCV + ffmpeg para video 1080p
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl libgl1 libglib2.0-0 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Instalar solo dependencias de la API (sin ML pesado)

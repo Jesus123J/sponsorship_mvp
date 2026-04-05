@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from api.core.config import CORS_ORIGINS, API_VERSION, ENV
 from api.core.rate_limit import rate_limiter
-from api.routers import dashboard, sponsors, matches, detections, settings, auth, plans, training, videos, pipeline
+from api.routers import dashboard, sponsors, matches, detections, settings, auth, plans, training, videos, pipeline, users
 
 # Logging
 logging.basicConfig(
@@ -69,6 +69,7 @@ app.include_router(matches.router, prefix="/api/matches", tags=["Partidos"])
 app.include_router(detections.router, prefix="/api/detections", tags=["Detecciones"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Configuracion"])
 app.include_router(plans.router, prefix="/api/plans", tags=["Planes"])
+app.include_router(users.router, prefix="/api/users", tags=["Gestion de Usuarios"])
 app.include_router(training.router, prefix="/api/training", tags=["Training YOLO"])
 app.include_router(videos.router, prefix="/api/training", tags=["Videos y Frames"])
 app.include_router(pipeline.router, prefix="/api/training", tags=["Pipeline Deteccion"])

@@ -1,7 +1,16 @@
 'use client'
 import { useEffect, useState, useRef } from 'react'
+import { getToken } from '@/lib/auth'
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'
+
+// Fetch con JWT token incluido
+function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = getToken()
+  const headers: any = { ...options.headers }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return fetch(url, { ...options, headers })
+}
 
 export default function PipelinePage() {
   const [activeStep, setActiveStep] = useState<'video' | 'frames' | 'dataset' | 'train' | 'run'>('video')
@@ -20,6 +29,7 @@ export default function PipelinePage() {
   const [extractStatus, setExtractStatus] = useState<any>(null)
   const [zipStatus, setZipStatus] = useState<any>(null)
   const [previewVideo, setPreviewVideo] = useState<string | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [labelGuide, setLabelGuide] = useState<any>(null)
   const [showGuide, setShowGuide] = useState(false)
   const pollRef = useRef<any>(null)
@@ -31,16 +41,16 @@ export default function PipelinePage() {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
-  const loadModelInfo = () => fetch(`${API}/training/model/info`).then(r => r.json()).then(setModelInfo).catch(() => {})
-  const loadVideos = () => fetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
-  const loadMatches = () => fetch(`${API}/matches/`).then(r => r.json()).then(setMatches).catch(() => {})
-  const loadLabelGuide = () => fetch(`${API}/settings/labeling-guide`).then(r => r.json()).then(setLabelGuide).catch(() => {})
+  const loadModelInfo = () => authFetch(`${API}/training/model/info`).then(r => r.json()).then(setModelInfo).catch(() => {})
+  const loadVideos = () => authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+  const loadMatches = () => authFetch(`${API}/matches/`).then(r => r.json()).then(setMatches).catch(() => {})
+  const loadLabelGuide = () => authFetch(`${API}/settings/labeling-guide`).then(r => r.json()).then(setLabelGuide).catch(() => {})
 
   const startPoll = (url: string, setter: (s: any) => void, onDone?: () => void) => {
     if (pollRef.current) clearInterval(pollRef.current)
     pollRef.current = setInterval(async () => {
       try {
-        const s = await fetch(url).then(r => r.json())
+        const s = await authFetch(url).then(r => r.json())
         setter(s)
         if (!s.running) { clearInterval(pollRef.current); onDone?.() }
       } catch {}
@@ -51,7 +61,7 @@ export default function PipelinePage() {
   const downloadYoutube = async () => {
     if (!ytUrl || !ytMatchId) return alert('Pon el link de YouTube y un match_id')
     try {
-      const res = await fetch(`${API}/training/download-youtube`, {
+      const res = await authFetch(`${API}/training/download-youtube`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: ytUrl, match_id: ytMatchId }),
       })
@@ -70,7 +80,7 @@ export default function PipelinePage() {
     form.append('file', file)
     if (selectedMatch) form.append('match_id', selectedMatch)
     try {
-      const res = await fetch(`${API}/training/upload-video`, { method: 'POST', body: form })
+      const res = await authFetch(`${API}/training/upload-video`, { method: 'POST', body: form })
       if (!res.ok) throw new Error((await res.json()).detail)
       loadVideos()
     } catch (err: any) { alert(err.message) }
@@ -81,7 +91,7 @@ export default function PipelinePage() {
   const extractFrames = async (matchId: string) => {
     setExtractStatus({ running: true, progress: 'Iniciando...', percent: 0, log: [] })
     try {
-      const res = await fetch(`${API}/training/extract-frames?match_id=${matchId}`, { method: 'POST' })
+      const res = await authFetch(`${API}/training/extract-frames?match_id=${matchId}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
       setActiveStep('frames')
       startPoll(`${API}/training/extract-frames/status`, setExtractStatus)
@@ -92,7 +102,7 @@ export default function PipelinePage() {
   const prepareZip = async (matchId: string, sample: number) => {
     setZipStatus({ running: true, progress: 'Preparando...', percent: 0, log: [] })
     try {
-      const res = await fetch(`${API}/training/frames/${matchId}/prepare-zip?sample=${sample}`, { method: 'POST' })
+      const res = await authFetch(`${API}/training/frames/${matchId}/prepare-zip?sample=${sample}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
       startPoll(`${API}/training/frames/${matchId}/prepare-zip/status`, setZipStatus)
     } catch (err: any) { setZipStatus({ error: err.message }) }
@@ -106,7 +116,7 @@ export default function PipelinePage() {
     const form = new FormData()
     form.append('file', file)
     try {
-      const res = await fetch(`${API}/training/upload-dataset`, { method: 'POST', body: form })
+      const res = await authFetch(`${API}/training/upload-dataset`, { method: 'POST', body: form })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
       setUploadResult(data)
@@ -117,7 +127,7 @@ export default function PipelinePage() {
   // ==================== TRAIN ====================
   const startTraining = async () => {
     try {
-      const res = await fetch(`${API}/training/train?epochs=${trainConfig.epochs}&imgsz=${trainConfig.imgsz}&batch=${trainConfig.batch}`, { method: 'POST' })
+      const res = await authFetch(`${API}/training/train?epochs=${trainConfig.epochs}&imgsz=${trainConfig.imgsz}&batch=${trainConfig.batch}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
       startPoll(`${API}/training/train/status`, setTrainingStatus, loadModelInfo)
     } catch (err: any) { setTrainingStatus({ error: err.message }) }
@@ -126,7 +136,7 @@ export default function PipelinePage() {
   // ==================== RUN PIPELINE ====================
   const runPipeline = async (matchId: string) => {
     try {
-      const res = await fetch(`${API}/training/run`, {
+      const res = await authFetch(`${API}/training/run`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ match_id: matchId }),
       })
@@ -145,6 +155,7 @@ export default function PipelinePage() {
   ]
 
   return (
+    
     <div>
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900">Pipeline de Analisis</h1>
@@ -234,7 +245,19 @@ export default function PipelinePage() {
                       <p className="text-xs text-gray-400">{v.size_mb} MB</p>
                     </div>
                     <div className="flex gap-2">
-                      <button onClick={() => setPreviewVideo(previewVideo === v.match_id ? null : v.match_id)}
+                      <button onClick={async () => {
+                          if (previewVideo === v.match_id) {
+                            setPreviewVideo(null)
+                            setVideoUrl(null)
+                          } else {
+                            try {
+                              const res = await authFetch(`${API}/training/video/${v.match_id}/token`)
+                              const data = await res.json()
+                              setVideoUrl(`${API}/training/video/${v.match_id}/stream?token=${data.token}`)
+                              setPreviewVideo(v.match_id)
+                            } catch { alert('Error al cargar video') }
+                          }
+                        }}
                         className={`px-3 py-2 rounded-xl text-sm font-medium transition-all ${
                           previewVideo === v.match_id
                             ? 'bg-slate-800 text-white'
@@ -250,10 +273,10 @@ export default function PipelinePage() {
                   </div>
 
                   {/* Video player */}
-                  {previewVideo === v.match_id && (
+                  {previewVideo === v.match_id && videoUrl && (
                     <div className="mt-4 rounded-xl overflow-hidden bg-black">
                       <video
-                        src={`${API}/training/video/${v.match_id}/stream`}
+                        src={videoUrl}
                         controls
                         className="w-full max-h-[400px]"
                         preload="metadata"
@@ -551,7 +574,9 @@ function TrainStep({ trainConfig, setTrainConfig, trainingStatus, startTraining,
   const [showHistory, setShowHistory] = useState(false)
 
   useEffect(() => {
-    fetch(`${API_URL}/training/model/history`).then(r => r.json()).then(setHistory).catch(() => {})
+    const token = getToken()
+    const headers: any = token ? { 'Authorization': `Bearer ${token}` } : {}
+    fetch(`${API_URL}/training/model/history`, { headers }).then(r => r.json()).then(setHistory).catch(() => {})
   }, [trainingStatus?.finished_at])
 
   const metrics = trainingStatus?.metrics
@@ -719,9 +744,10 @@ function NewLabelRow({ label }: { label: string }) {
   const save = async () => {
     setStatus('saving')
     try {
+      const token = getToken()
       const res = await fetch(`${API_URL}/sponsors/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
         body: JSON.stringify({ sponsor_id: label, nombre, categoria, tier_mvp: 3 }),
       })
       if (!res.ok) throw new Error((await res.json()).detail)

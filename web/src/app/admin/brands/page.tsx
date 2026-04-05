@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { getSponsors, getBrandDetections, getMenciones } from '@/lib/api'
 import FilterBar from '@/components/FilterBar'
 import ExportPDF from '@/components/ExportPDF'
+import ErrorAlert from '@/components/ErrorAlert'
 
 export default function BrandView() {
   const [sponsors, setSponsors] = useState<any[]>([])
@@ -10,15 +11,20 @@ export default function BrandView() {
   const [data, setData] = useState<any[]>([])
   const [menciones, setMenciones] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [sponsorError, setSponsorError] = useState<string | null>(null)
   const [filters, setFilters] = useState({
     matchId: '', sponsorId: '', entityId: '', positionType: '', matchPeriod: ''
   })
 
-  useEffect(() => { getSponsors().then(setSponsors).catch(() => {}) }, [])
-
   useEffect(() => {
+    getSponsors().then(setSponsors).catch((e) => setSponsorError(e.message))
+  }, [])
+
+  const loadData = () => {
     if (!selectedSponsor) { setData([]); setMenciones([]); setLoading(false); return }
     setLoading(true)
+    setError(null)
     Promise.all([
       getBrandDetections(selectedSponsor, {
         match_id: filters.matchId || undefined,
@@ -28,12 +34,14 @@ export default function BrandView() {
       getMenciones(selectedSponsor, filters.matchId || undefined),
     ])
       .then(([dets, mencs]) => {
-        setData(dets.map((d: any) => ({ entity: d.entity_id, position: d.position_type, localidad: d.localidad || '', smv: d.smv, count: d.detecciones })))
+        const rows = dets.data || dets
+        setData((Array.isArray(rows) ? rows : []).map((d: any) => ({ entity: d.entity_id, position: d.position_type, localidad: d.localidad || '', smv: d.smv, count: d.detecciones })))
         setMenciones(mencs)
         setLoading(false)
       })
-      .catch(() => { setData([]); setMenciones([]); setLoading(false) })
-  }, [selectedSponsor, filters])
+      .catch((e) => { setError(e.message); setData([]); setMenciones([]); setLoading(false) })
+  }
+  useEffect(() => { loadData() }, [selectedSponsor, filters])
 
   const fmt = (n: number) => `S/. ${n.toLocaleString('es-PE', { maximumFractionDigits: 0 })}`
   const totalSMV = data.reduce((s, d) => s + d.smv, 0)
@@ -64,7 +72,11 @@ export default function BrandView() {
         </div>
       </div>
 
+      {sponsorError && <ErrorAlert message={sponsorError} onRetry={() => { setSponsorError(null); getSponsors().then(setSponsors).catch((e) => setSponsorError(e.message)) }} />}
+
       <FilterBar filters={filters} onChange={setFilters} showSponsor={false} />
+
+      {error && <ErrorAlert message={error} onRetry={loadData} />}
 
       <div id="brand-content">
         {selectedSponsor && (

@@ -23,3 +23,12 @@ process_status = {
 def now() -> str:
     """Timestamp corto para logs."""
     return datetime.now().strftime("%H:%M:%S")
+
+
+def reset_all_processes():
+    """Resetea todos los procesos bloqueados."""
+    for key in process_status:
+        process_status[key] = {
+            "running": False, "progress": "", "log": [],
+            "finished_at": None, "error": None,
+        }

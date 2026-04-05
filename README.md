@@ -400,6 +400,32 @@ cp .env.example .env.local    # agregar credenciales
 npm run dev                    # localhost:3000
 ```
 
+### Etiquetar con Label Studio
+
+Usamos **Label Studio** para etiquetar los logos de sponsors en los frames extraidos del video. Es el paso previo a entrenar el modelo YOLO.
+
+```bash
+# Instalar (una sola vez)
+pip install label-studio
+
+# Ejecutar
+label-studio start
+# Se abre en http://localhost:8080
+```
+
+**Flujo de etiquetado:**
+
+1. Abrir Label Studio en `http://localhost:8080`
+2. Crear un proyecto nuevo → elegir template **Object Detection with Bounding Boxes**
+3. Subir los frames JPG (extraidos desde el dashboard en el paso 2 del Pipeline)
+4. Configurar las etiquetas con los `sponsor_id` exactos de la BD:
+   - Ir a Settings → Labeling Interface
+   - Agregar cada sponsor como label: `apuesta_total`, `marathon`, `nike`, etc.
+   - Consultar `/api/settings/labeling-guide` para ver la lista exacta
+5. Etiquetar: dibujar bounding boxes sobre cada logo visible en el frame
+6. Exportar en formato **YOLO** → genera un ZIP
+7. Subir ese ZIP en el paso 3 del Pipeline (Upload dataset)
+
 ### Procesar un partido
 
 ```bash

@@ -1,6 +1,7 @@
 'use client'
 import AdminSidebar from '@/components/AdminSidebar'
 import AuthGuard from '@/components/AuthGuard'
+import ProcessMonitor from '@/components/ProcessMonitor'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -24,6 +25,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             {children}
           </div>
         </main>
+
+        {/* Monitor flotante de procesos — visible en todas las paginas admin */}
+        <ProcessMonitor />
       </div>
     </AuthGuard>
   )
@@ -32,6 +36,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 function LogoutButton() {
   const handleLogout = () => {
     localStorage.removeItem('user')
+    localStorage.removeItem('token')
     window.location.href = '/login'
   }
   return (

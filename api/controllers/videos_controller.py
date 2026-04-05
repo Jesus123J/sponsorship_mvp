@@ -8,13 +8,27 @@ from api.shared.process_state import (
 )
 
 
-def download_youtube(url: str, match_id: str) -> dict:
-    """Descarga video de YouTube en background."""
+def download_youtube(url: str, match_id: str, quality: str = "480") -> dict:
+    """Descarga video de YouTube en background.
+
+    quality: "480" (rapido, ~200MB), "720" (medio, ~500MB), "1080" (pesado, ~1GB+)
+    Para deteccion de logos, 480p es suficiente.
+    """
     if process_status.get("youtube", {}).get("running"):
         return {"error": "Ya hay una descarga en curso", "status": 409}
 
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     output_path = os.path.join(VIDEOS_DIR, f'{match_id}.mp4')
+
+    # Formatos por calidad — forzar H.264 (compatible con OpenCV) + audio
+    # vcodec!=av01 excluye AV1 que no funciona en el contenedor
+    format_map = {
+        "360": "bestvideo[height<=360][vcodec^=avc]+bestaudio/best[height<=360]",
+        "480": "bestvideo[height<=480][vcodec^=avc]+bestaudio/best[height<=480]",
+        "720": "bestvideo[height<=720][vcodec^=avc]+bestaudio/best[height<=720]",
+        "1080": "bestvideo[height<=1080][vcodec^=avc]+bestaudio/best[height<=1080]",
+    }
+    video_format = format_map.get(quality, format_map["1080"])
 
     def download_worker():
         process_status["youtube"] = {
@@ -26,6 +40,7 @@ def download_youtube(url: str, match_id: str) -> dict:
         try:
             import yt_dlp
             log.append(f"[{now()}] Descargando: {url}")
+            log.append(f"[{now()}] Calidad: {quality}p")
 
             def progress_hook(d):
                 if d['status'] == 'downloading':
@@ -37,18 +52,33 @@ def download_youtube(url: str, match_id: str) -> dict:
                     process_status["youtube"]["progress"] = "Procesando video..."
 
             opts = {
-                'format': 'best[height>=720][ext=mp4]/best[height>=480][ext=mp4]/best[ext=mp4]/best',
+                'format': video_format,
                 'outtmpl': output_path,
                 'progress_hooks': [progress_hook],
-                'quiet': True, 'no_warnings': True,
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'socket_timeout': 300,
+                'retries': 5,
+                'fragment_retries': 5,
+                'merge_output_format': 'mp4',    # Forzar salida en mp4
+                'postprocessors': [{
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }],
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 duration = info.get('duration', 0)
-                log.append(f"[{now()}] {info.get('title', '?')} — {duration // 60}min")
+                title = info.get('title', '?')
+                height = info.get('height', '?')
+                log.append(f"[{now()}] {title}")
+                log.append(f"[{now()}] Duracion: {duration // 60}min {duration % 60}seg")
+                log.append(f"[{now()}] Resolucion: {height}p")
 
             size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.exists(output_path) else 0
-            process_status["youtube"]["progress"] = f"Completado — {size_mb:.0f} MB"
+            log.append(f"[{now()}] Archivo: {size_mb:.1f} MB")
+            process_status["youtube"]["progress"] = f"Completado — {size_mb:.0f} MB ({quality}p)"
             process_status["youtube"]["finished_at"] = now()
 
         except Exception as e:
@@ -64,6 +94,17 @@ def download_youtube(url: str, match_id: str) -> dict:
 
 def get_youtube_status() -> dict:
     return process_status.get("youtube", {"running": False, "progress": "", "log": []})
+
+
+def reset_process(process_key: str) -> dict:
+    """Resetea un proceso bloqueado a estado inicial."""
+    valid_keys = ["youtube", "extract", "zip"]
+    if process_key not in valid_keys:
+        return {"error": f"Proceso invalido. Opciones: {valid_keys}", "status": 400}
+    process_status[process_key] = {
+        "running": False, "progress": "", "log": [], "finished_at": None, "error": None
+    }
+    return {"message": f"Proceso '{process_key}' reseteado"}
 
 
 def save_uploaded_video(content: bytes, match_id: str) -> dict:
