@@ -45,8 +45,10 @@ export default function ProcessMonitor() {
           if (!res.ok) continue
           const data = await res.json()
 
-          // Actualizar solo si hay datos reales
-          if (data.running || data.error || data.finished_at || data.progress) {
+          const prev = stableProcesses.current[ep.key]
+          const hasNewData = data.running || data.error || data.finished_at || data.progress
+
+          if (hasNewData) {
             stableProcesses.current[ep.key] = {
               key: ep.key,
               label: ep.label,
@@ -58,6 +60,11 @@ export default function ProcessMonitor() {
               finished_at: data.finished_at,
               match_id: data.match_id,
             }
+          } else if (prev && prev.finished_at && !prev.running) {
+            // Mantener el estado "completado" — no borrar con datos vacios
+          } else if (prev && !data.running) {
+            // Proceso terminó sin finished_at — limpiar
+            delete stableProcesses.current[ep.key]
           }
         } catch {
           // No borrar datos existentes si falla la peticion

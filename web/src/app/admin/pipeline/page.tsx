@@ -389,14 +389,27 @@ export default function PipelinePage() {
               {zipStatus && (
                 <div className="mb-6">
                   <ProgressCard status={zipStatus} showBar />
-                  {zipStatus.download_url && !zipStatus.running && (
-                    <a href={`${API}${zipStatus.download_url.replace('/api', '')}`} download
+                  {zipStatus.download_url && !zipStatus.running && !zipStatus.error && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const url = `${API}${zipStatus.download_url.replace('/api', '')}`
+                          const res = await authFetch(url)
+                          if (!res.ok) throw new Error('Error al descargar')
+                          const blob = await res.blob()
+                          const a = document.createElement('a')
+                          a.href = URL.createObjectURL(blob)
+                          a.download = zipStatus.download_url.split('file=')[1] || 'frames.zip'
+                          a.click()
+                          URL.revokeObjectURL(a.href)
+                        } catch (err: any) { alert(err.message) }
+                      }}
                       className="inline-flex items-center gap-2 mt-3 px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 transition-colors">
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
                       </svg>
                       Descargar ZIP
-                    </a>
+                    </button>
                   )}
                 </div>
               )}
