@@ -19,6 +19,7 @@ interface ProcessInfo {
 const ENDPOINTS = [
   { key: 'youtube', label: 'Descarga YouTube', icon: '📥', endpoint: '/training/download-youtube/status' },
   { key: 'extract', label: 'Extraccion frames', icon: '🎞️', endpoint: '/training/extract-frames/status' },
+  { key: 'zip', label: 'Preparando ZIP', icon: '📦', endpoint: '/training/zip/status' },
   { key: 'training', label: 'Entrenamiento YOLO', icon: '🧠', endpoint: '/training/train/status' },
   { key: 'pipeline', label: 'Pipeline deteccion', icon: '⚡', endpoint: '/training/pipeline/status' },
 ]

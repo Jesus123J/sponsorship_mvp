@@ -158,6 +158,12 @@ def prepare_zip(match_id: str, sample: int = 0, current_user: dict = Depends(req
     return result
 
 
+@router.get("/zip/status")
+def zip_status_global(current_user: dict = Depends(require_admin)):
+    """Estado del ZIP (sin match_id, para el monitor flotante)."""
+    return ctrl.get_zip_status()
+
+
 @router.get("/frames/{match_id}/prepare-zip/status")
 def zip_status(match_id: str, current_user: dict = Depends(require_admin)):
     return ctrl.get_zip_status()
