@@ -17,6 +17,7 @@ process_status = {
     "youtube": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
     "extract": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
     "zip": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
+    "analyze": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
 }
 
 

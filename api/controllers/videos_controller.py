@@ -2,10 +2,109 @@
 import os
 import zipfile
 import threading
+import subprocess
 from datetime import datetime
 from api.shared.process_state import (
     DATA_DIR, VIDEOS_DIR, FRAMES_DIR, process_status, now,
 )
+
+
+def trim_video(source_match_id: str, output_match_id: str, start_seconds: float, duration_seconds: float) -> dict:
+    """Corta un video existente usando ffmpeg (copy, sin recodificar).
+
+    Devuelve {match_id, size_mb, path, duration_seg, start_seg}.
+    """
+    src_path = os.path.join(VIDEOS_DIR, f'{source_match_id}.mp4')
+    if not os.path.exists(src_path):
+        return {"error": f"Video fuente no encontrado: {source_match_id}", "status": 404}
+
+    output_match_id = output_match_id.strip().replace(' ', '_')
+    if not output_match_id:
+        return {"error": "output_match_id es requerido", "status": 400}
+
+    dst_path = os.path.join(VIDEOS_DIR, f'{output_match_id}.mp4')
+    if os.path.abspath(dst_path) == os.path.abspath(src_path):
+        return {"error": "El match_id destino no puede ser igual al origen", "status": 400}
+    if os.path.exists(dst_path):
+        return {"error": f"Ya existe un video con match_id '{output_match_id}'. Elige otro.", "status": 409}
+
+    if start_seconds < 0:
+        start_seconds = 0
+    if duration_seconds <= 0 or duration_seconds > 3600:
+        return {"error": "Duracion debe estar entre 1 y 3600 segundos", "status": 400}
+
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+
+    # -ss antes de -i = busqueda rapida en keyframes (copy-safe)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start_seconds),
+        "-i", src_path,
+        "-t", str(duration_seconds),
+        "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
+        dst_path,
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            # Si falla con -c copy (keyframes no alineados), reintenta recodificando
+            cmd_reencode = [
+                "ffmpeg", "-y",
+                "-ss", str(start_seconds),
+                "-i", src_path,
+                "-t", str(duration_seconds),
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac",
+                dst_path,
+            ]
+            result = subprocess.run(cmd_reencode, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                return {"error": f"ffmpeg fallo: {result.stderr[-300:]}", "status": 500}
+    except subprocess.TimeoutExpired:
+        return {"error": "Timeout al cortar video", "status": 500}
+    except FileNotFoundError:
+        return {"error": "ffmpeg no esta instalado en el servidor", "status": 500}
+
+    if not os.path.exists(dst_path):
+        return {"error": "El video cortado no se genero", "status": 500}
+
+    size_mb = round(os.path.getsize(dst_path) / (1024 * 1024), 2)
+    return {
+        "message": "Video cortado exitosamente",
+        "match_id": output_match_id,
+        "source_match_id": source_match_id,
+        "size_mb": size_mb,
+        "start_seg": start_seconds,
+        "duration_seg": duration_seconds,
+        "filename": f"{output_match_id}.mp4",
+    }
+
+
+def get_video_info(match_id: str) -> dict:
+    """Lee duracion y resolucion de un video con ffprobe."""
+    path = os.path.join(VIDEOS_DIR, f'{match_id}.mp4')
+    if not os.path.exists(path):
+        return {"error": "Video no encontrado", "status": 404}
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration,size:stream=width,height,codec_type",
+             "-of", "default=noprint_wrappers=1", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        info: dict = {"match_id": match_id, "size_mb": round(os.path.getsize(path) / (1024 * 1024), 2)}
+        for line in result.stdout.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                if k == 'duration': info['duration_seg'] = round(float(v), 1)
+                elif k == 'width' and 'width' not in info: info['width'] = int(v)
+                elif k == 'height' and 'height' not in info: info['height'] = int(v)
+        return info
+    except Exception as e:
+        return {"error": str(e), "status": 500}
 
 
 def download_youtube(url: str, match_id: str, quality: str = "480") -> dict:

@@ -53,6 +53,29 @@ async def upload_video(file: UploadFile = File(...), match_id: str = None, curre
     return ctrl.save_uploaded_video(content, match_id)
 
 
+class TrimVideoRequest(BaseModel):
+    source_match_id: str
+    output_match_id: str = Field(..., min_length=1, max_length=100)
+    start_seconds: float = Field(0, ge=0)
+    duration_seconds: float = Field(..., gt=0, le=3600)
+
+
+@router.post("/trim-video")
+def trim_video(req: TrimVideoRequest, current_user: dict = Depends(require_admin)):
+    result = ctrl.trim_video(req.source_match_id, req.output_match_id, req.start_seconds, req.duration_seconds)
+    if "error" in result:
+        raise HTTPException(status_code=result.get("status", 500), detail=result["error"])
+    return result
+
+
+@router.get("/video/{match_id}/info")
+def video_info(match_id: str, current_user: dict = Depends(require_admin)):
+    result = ctrl.get_video_info(match_id)
+    if "error" in result:
+        raise HTTPException(status_code=result.get("status", 500), detail=result["error"])
+    return result
+
+
 @router.get("/videos")
 def list_videos(current_user: dict = Depends(require_admin)):
     return ctrl.list_videos()

@@ -20,10 +20,14 @@ COPY sql/ ./sql/
 
 EXPOSE 8000
 
-# Produccion: gunicorn con 4 workers
+# Produccion: gunicorn con 1 worker
+# IMPORTANTE: el entrenamiento/pipeline mantiene estado en memoria del proceso.
+# Con mas de 1 worker, el polling de /status golpea workers distintos y no ve
+# el estado del entrenamiento. Usar 1 worker hasta migrar estado a Redis/BD.
 CMD ["gunicorn", "api.main:app", \
-     "-w", "4", \
+     "-w", "1", \
      "-k", "uvicorn.workers.UvicornWorker", \
      "-b", "0.0.0.0:8000", \
+     "--timeout", "0", \
      "--access-logfile", "-", \
      "--error-logfile", "-"]

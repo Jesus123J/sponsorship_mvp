@@ -41,8 +41,14 @@ app.add_middleware(
 # Rate limiting middleware
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Excluir health check del rate limit
-    if request.url.path != "/api/health":
+    path = request.url.path
+    # Excluir health check y endpoints de polling de status (pipeline UI los consulta cada 2s)
+    skip_rate_limit = (
+        path == "/api/health"
+        or path.endswith("/status")
+        or "/status" in path
+    )
+    if not skip_rate_limit:
         client_ip = request.client.host if request.client else "unknown"
         rate_limiter.check(client_ip)
     response = await call_next(request)
@@ -73,6 +79,9 @@ app.include_router(users.router, prefix="/api/users", tags=["Gestion de Usuarios
 app.include_router(training.router, prefix="/api/training", tags=["Training YOLO"])
 app.include_router(videos.router, prefix="/api/training", tags=["Videos y Frames"])
 app.include_router(pipeline.router, prefix="/api/training", tags=["Pipeline Deteccion"])
+
+from api.routers import analyze
+app.include_router(analyze.router, prefix="/api/training", tags=["Analizar Video"])
 
 
 @app.get("/api/health")

@@ -16,3 +16,6 @@ pyyaml>=6.0
 # --- Video processing ---
 yt-dlp>=2024.1
 opencv-python-headless>=4.8
+
+# --- YOLO training + inference ---
+ultralytics>=8.0

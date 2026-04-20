@@ -11,6 +11,10 @@ from api.shared.process_state import (
 )
 
 
+# Recibe el ZIP exportado de Label Studio, lo descomprime en TRAINING_DIR
+# y analiza su contenido: cuenta imagenes/labels, lee las clases del .yaml
+# y las cruza con los sponsors ya registrados en BD para indicar cuales
+# son nuevas y cuales ya existen. No entrena, solo prepara el dataset.
 def upload_dataset(zip_content: bytes, filename: str) -> dict:
     """Extrae ZIP de Label Studio y analiza contenido."""
     if os.path.exists(TRAINING_DIR):
@@ -32,26 +36,74 @@ def upload_dataset(zip_content: bytes, filename: str) -> dict:
             files.append(os.path.relpath(os.path.join(root, fname), TRAINING_DIR))
 
     images = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    labels = [f for f in files if f.lower().endswith('.txt')]
+    labels = [f for f in files if f.lower().endswith('.txt') and not f.lower().endswith('classes.txt')]
     yaml_files = [f for f in files if f.lower().endswith(('.yaml', '.yml'))]
 
-    # Leer clases del YAML
-    dataset_labels = set()
-    for yf in yaml_files:
-        try:
-            import yaml
-            with open(os.path.join(TRAINING_DIR, yf), 'r') as f:
-                data = yaml.safe_load(f)
-                names = data.get('names', {})
-                if isinstance(names, dict):
-                    dataset_labels.update(names.values())
-                elif isinstance(names, list):
-                    dataset_labels.update(names)
-        except Exception:
-            pass
+    # Encuentra la carpeta 'images' real dentro del arbol (donde vive el dataset)
+    images_dir = None
+    labels_dir = None
+    for root, dirs, _ in os.walk(TRAINING_DIR):
+        if 'images' in dirs:
+            candidate = os.path.join(root, 'images')
+            # tiene que contener al menos un archivo de imagen
+            has_imgs = any(
+                f.lower().endswith(('.jpg', '.jpeg', '.png'))
+                for f in os.listdir(candidate)
+                if os.path.isfile(os.path.join(candidate, f))
+            )
+            if has_imgs:
+                images_dir = candidate
+                potential_labels = os.path.join(root, 'labels')
+                if os.path.isdir(potential_labels):
+                    labels_dir = potential_labels
+                break
+
+    # Leer clases (prefiere classes.txt si existe; fallback a names del yaml)
+    dataset_labels_list: list[str] = []
+    classes_txt_path = None
+    for root, _, fnames in os.walk(TRAINING_DIR):
+        if 'classes.txt' in fnames:
+            classes_txt_path = os.path.join(root, 'classes.txt')
+            break
+    if classes_txt_path:
+        with open(classes_txt_path, 'r') as f:
+            dataset_labels_list = [l.strip() for l in f.readlines() if l.strip()]
+
+    if not dataset_labels_list:
+        # fallback al yaml existente si lo hay
+        for yf in yaml_files:
+            try:
+                import yaml
+                with open(os.path.join(TRAINING_DIR, yf), 'r') as f:
+                    data = yaml.safe_load(f) or {}
+                    names = data.get('names', {})
+                    if isinstance(names, dict):
+                        dataset_labels_list = [names[k] for k in sorted(names.keys())]
+                    elif isinstance(names, list):
+                        dataset_labels_list = list(names)
+                if dataset_labels_list:
+                    break
+            except Exception:
+                pass
+
+    # Reescribe data.yaml con rutas ABSOLUTAS para que YOLO siempre lo encuentre
+    if images_dir and dataset_labels_list:
+        import yaml as yamllib
+        final_yaml = {
+            'path': os.path.abspath(os.path.dirname(images_dir)),
+            'train': os.path.abspath(images_dir),
+            'val': os.path.abspath(images_dir),  # sin split, usa train como val
+            'nc': len(dataset_labels_list),
+            'names': {i: n for i, n in enumerate(dataset_labels_list)},
+        }
+        yaml_out_path = os.path.join(TRAINING_DIR, 'data.yaml')
+        with open(yaml_out_path, 'w') as f:
+            yamllib.dump(final_yaml, f, sort_keys=False, allow_unicode=True)
 
     existing_sponsors = fetch_all("SELECT sponsor_id FROM sponsors")
     existing_ids = {s["sponsor_id"] for s in existing_sponsors}
+
+    dataset_labels_set = set(dataset_labels_list)
 
     return {
         "message": "Dataset subido y extraido",
@@ -60,12 +112,23 @@ def upload_dataset(zip_content: bytes, filename: str) -> dict:
         "labels": len(labels),
         "yaml_files": yaml_files,
         "path": TRAINING_DIR,
-        "dataset_labels": sorted(list(dataset_labels)),
-        "labels_in_db": sorted(list(dataset_labels & existing_ids)),
-        "labels_new": sorted(list(dataset_labels - existing_ids)),
+        "images_dir": images_dir,
+        "labels_dir": labels_dir,
+        "dataset_labels": sorted(list(dataset_labels_set)),
+        "labels_in_db": sorted(list(dataset_labels_set & existing_ids)),
+        "labels_new": sorted(list(dataset_labels_set - existing_ids)),
     }
 
 
+# Lanza el entrenamiento YOLO real en un thread en background para no
+# bloquear la API. Valida que no haya otro corriendo y que exista dataset
+# + yaml. Dentro del worker: carga YOLOv8n como base, registra un callback
+# que actualiza progreso/metricas por epoch (precision, recall, mAP50,
+# mAP50-95, box_loss, cls_loss) en process_status, y llama model.train()
+# con los hiperparametros recibidos — aqui ocurre el entrenamiento real
+# de ultralytics. Al terminar, copia weights/best.pt al nivel superior
+# (data/models/yolo_v1.0/best.pt) para que la inferencia lo encuentre y
+# guarda el historico. Captura cualquier excepcion y la expone en estado.
 def start_training(epochs: int, imgsz: int, batch: int) -> dict:
     """Inicia entrenamiento YOLO en background."""
     if process_status["training"]["running"]:
@@ -125,6 +188,8 @@ def start_training(epochs: int, imgsz: int, batch: int) -> dict:
             model.train(
                 data=yaml_path, epochs=epochs, imgsz=imgsz, batch=batch,
                 project=os.path.join(DATA_DIR, 'models'), name='yolo_v1.0', exist_ok=True,
+                workers=0,   # DataLoader sin multiprocessing (Docker cuelga con workers>0)
+                verbose=True,
             )
 
             best_src = os.path.join(DATA_DIR, 'models', 'yolo_v1.0', 'weights', 'best.pt')
@@ -152,10 +217,17 @@ def start_training(epochs: int, imgsz: int, batch: int) -> dict:
     return {"message": "Entrenamiento iniciado en background", "epochs": epochs, "imgsz": imgsz}
 
 
+# Devuelve el estado compartido del entrenamiento (running, progress,
+# percent, log, metrics, epoch_history, error). Es lo que el front
+# consulta por polling mientras corre para pintar barra de progreso,
+# log en vivo y graficas de metricas epoch a epoch.
 def get_training_status() -> dict:
     return process_status["training"]
 
 
+# Verifica si existe best.pt en la ruta canonica. Si existe, adjunta
+# tamano en MB y fecha de ultima modificacion. Permite al front saber
+# si ya hay un modelo entrenado disponible para inferencia.
 def get_model_info() -> dict:
     best_path = os.path.join(DATA_DIR, 'models', 'yolo_v1.0', 'best.pt')
     exists = os.path.exists(best_path)
@@ -167,6 +239,9 @@ def get_model_info() -> dict:
     return info
 
 
+# Lee training_history.json y devuelve la lista de entrenamientos
+# pasados (fecha, hiperparametros, metricas finales, epoch_history).
+# Devuelve lista vacia si aun no se ha entrenado nunca.
 def get_model_history() -> list:
     history_path = os.path.join(DATA_DIR, 'models', 'training_history.json')
     if not os.path.exists(history_path):
@@ -177,6 +252,10 @@ def get_model_history() -> list:
 
 # ── Helpers ──
 
+# Busca recursivamente el yaml de configuracion del dataset dentro
+# del directorio extraido. Prioriza archivos cuyo nombre contenga
+# "data" (p.ej. data.yaml); si no hay, devuelve el primer .yaml/.yml
+# que aparezca. Retorna None si no encuentra ninguno.
 def _find_yaml(directory: str) -> str | None:
     for root, dirs, fnames in os.walk(directory):
         for fname in fnames:
@@ -189,6 +268,9 @@ def _find_yaml(directory: str) -> str | None:
     return None
 
 
+# Hace append al training_history.json con la info del entrenamiento
+# recien terminado: fecha ISO, hiperparametros usados, metricas finales
+# y el epoch_history completo. Crea el archivo si no existia.
 def _save_history(epochs, imgsz, batch, final_metrics, epoch_history):
     history_path = os.path.join(DATA_DIR, 'models', 'training_history.json')
     history = []

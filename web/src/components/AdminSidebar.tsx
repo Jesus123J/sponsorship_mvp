@@ -50,6 +50,24 @@ const navItems = [
     ),
   },
   {
+    label: 'Cortar videos',
+    href: '/admin/trim-video',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M7.848 8.25l1.536.887M7.848 8.25a3 3 0 1 1-5.196-3 3 3 0 0 1 5.196 3zm1.536.887a2.165 2.165 0 0 1 1.083 1.839c.005.351.054.695.14 1.024M9.384 9.137l2.077 1.199M7.848 15.75l1.536-.887m-1.536.887a3 3 0 1 0-5.196 3 3 3 0 0 0 5.196-3zm1.536-.887a2.165 2.165 0 0 0 1.083-1.838c.005-.352.054-.695.14-1.025m0 0a3 3 0 1 1 5.33-2.676 3 3 0 0 1-5.33 2.676zm0 5.354a3 3 0 1 0 5.33 2.676 3 3 0 0 0-5.33-2.676zm0 0l2.077-1.199" />
+      </svg>
+    ),
+  },
+  {
+    label: 'Analizar video',
+    href: '/admin/analyze-video',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+      </svg>
+    ),
+  },
+  {
     label: 'Configuracion',
     href: '/admin/settings',
     icon: (
