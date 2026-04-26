@@ -33,13 +33,30 @@ export default function AnalyzeVideoPage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [detections, setDetections] = useState<any>(null)
   const [filterSponsor, setFilterSponsor] = useState('')
-  const [filterSource, setFilterSource] = useState<'all' | 'jugador' | 'estadio'>('all')
+  const [filterSource, setFilterSource] = useState<'all' | 'jugador' | 'estadio' | 'tribuna_staff'>('all')
+  const [filterSurface, setFilterSurface] = useState<'all' | 'overlay_digital' | 'fisico'>('all')
+  const [filterEntity, setFilterEntity] = useState<string>('all')
   const [jumpToTime, setJumpToTime] = useState<number | null>(null)
+  // Catalogo + partido info
+  const [equipos, setEquipos] = useState<any[]>([])
+  const [estadios, setEstadios] = useState<any[]>([])
+  const [torneos, setTorneos] = useState<any[]>([])
+  const [partidos, setPartidos] = useState<any[]>([])
+  const [matchForm, setMatchForm] = useState({ equipo_local: '', equipo_visitante: '', torneo_id: '', estadio_id: '' })
+  const [savingMatch, setSavingMatch] = useState(false)
+  const [saveResult, setSaveResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [viewingDet, setViewingDet] = useState<any>(null)
+  const [frameDataUrl, setFrameDataUrl] = useState<string>('')
+  const [frameLoading, setFrameLoading] = useState(false)
   const pollRef = useRef<any>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
     authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+    authFetch(`${API}/catalog/equipos`).then(r => r.json()).then(setEquipos).catch(() => {})
+    authFetch(`${API}/catalog/estadios`).then(r => r.json()).then(setEstadios).catch(() => {})
+    authFetch(`${API}/catalog/torneos`).then(r => r.json()).then(setTorneos).catch(() => {})
+    authFetch(`${API}/catalog/partidos`).then(r => r.json()).then(setPartidos).catch(() => {})
     authFetch(`${API}/training/analyze-video/status`).then(r => r.json()).then(s => {
       if (s?.running) {
         setStatus(s); setSelected(s.match_id)
@@ -51,6 +68,74 @@ export default function AnalyzeVideoPage() {
     }).catch(() => {})
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
+
+  // Cuando cambia el video seleccionado, carga datos del partido
+  useEffect(() => {
+    if (!selected) return
+    const p = partidos.find((pp: any) => pp.match_id === selected)
+    setMatchForm({
+      equipo_local: p?.equipo_local && p.equipo_local !== 'desconocido' ? p.equipo_local : '',
+      equipo_visitante: p?.equipo_visitante && p.equipo_visitante !== 'desconocido' ? p.equipo_visitante : '',
+      torneo_id: p?.torneo_id || '',
+      estadio_id: p?.estadio_id || '',
+    })
+  }, [selected, partidos])
+
+  const selectedPartido = partidos.find((p: any) => p.match_id === selected)
+  const matchConfigured = !!(selectedPartido &&
+    selectedPartido.equipo_local &&
+    selectedPartido.equipo_local !== 'desconocido' &&
+    selectedPartido.equipo_visitante &&
+    selectedPartido.equipo_visitante !== 'desconocido')
+
+  const saveMatchConfig = async () => {
+    if (!selected) return
+    setSaveResult(null)
+    if (!matchForm.equipo_local || !matchForm.equipo_visitante) {
+      setSaveResult({ ok: false, msg: 'Selecciona equipo local y visitante' })
+      return
+    }
+    setSavingMatch(true)
+    try {
+      // Construir payload sin valores vacios
+      const payload: any = { match_id: selected }
+      for (const k of ['equipo_local', 'equipo_visitante', 'torneo_id', 'estadio_id'] as const) {
+        if (matchForm[k]) payload[k] = matchForm[k]
+      }
+
+      const res = await authFetch(`${API}/catalog/partidos`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        // data.detail puede ser un string, un array (Pydantic) o un objeto
+        let msg = ''
+        if (typeof data.detail === 'string') msg = data.detail
+        else if (Array.isArray(data.detail)) msg = data.detail.map((e: any) => `${(e.loc || []).join('.')}: ${e.msg}`).join(' | ')
+        else if (data.detail) msg = JSON.stringify(data.detail)
+        else msg = JSON.stringify(data)
+        throw new Error(`HTTP ${res.status} — ${msg}`)
+      }
+
+      // Recargar partidos
+      const updated = await authFetch(`${API}/catalog/partidos`).then(r => r.json())
+      setPartidos(updated)
+
+      const p = updated.find((pp: any) => pp.match_id === selected)
+      if (p && p.equipo_local === matchForm.equipo_local) {
+        setSaveResult({
+          ok: true,
+          msg: `Guardado: ${p.local_nombre || p.equipo_local} vs ${p.visitante_nombre || p.equipo_visitante}. ¡Ya puedes re-analizar el video!`,
+        })
+      } else {
+        setSaveResult({ ok: false, msg: 'El backend no confirmo el cambio. Revisa los logs.' })
+      }
+    } catch (e: any) {
+      setSaveResult({ ok: false, msg: `Error: ${e.message}` })
+    }
+    setSavingMatch(false)
+  }
 
   const startPolling = () => {
     if (pollRef.current) clearInterval(pollRef.current)
@@ -117,10 +202,12 @@ export default function AnalyzeVideoPage() {
   const downloadDetectionsCsv = () => {
     if (!detections?.detections) return
     const rows = [
-      ['frame', 'timestamp_seg', 'timestamp', 'sponsor', 'source', 'player_overlap', 'confidence', 'x1', 'y1', 'x2', 'y2', 'width', 'height', 'persons_in_frame'],
+      ['frame', 'timestamp_seg', 'timestamp', 'sponsor', 'source', 'surface_type', 'is_overlay', 'entity_id', 'player_overlap', 'color_distance', 'confidence', 'x1', 'y1', 'x2', 'y2', 'width', 'height', 'persons_in_frame'],
       ...detections.detections.map((d: any) => [
         d.frame, d.timestamp, d.timestamp_str, d.sponsor,
-        d.source || 'estadio', d.player_overlap || 0, d.confidence,
+        d.source || 'estadio', d.surface_type || 'fisico_estadio', d.is_overlay ? 1 : 0,
+        d.entity_id || '', d.player_overlap || 0, d.color_distance || '',
+        d.confidence,
         d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3], d.width, d.height,
         d.persons_in_frame || 0,
       ]),
@@ -143,9 +230,84 @@ export default function AnalyzeVideoPage() {
     setJumpToTime(sec)
   }
 
+  // Abre panel flotante con el frame capturado + datos de la deteccion
+  const viewDetection = async (det: any) => {
+    setViewingDet(det)
+    setFrameDataUrl('')
+    setFrameLoading(true)
+
+    // Intento 1: canvas del <video> (rapido, sin network)
+    const v = videoRef.current
+    let canvasOk = false
+
+    if (v && v.videoWidth > 0) {
+      try {
+        v.pause()
+        await new Promise<void>((resolve) => {
+          const onSeeked = () => { v.removeEventListener('seeked', onSeeked); resolve() }
+          v.addEventListener('seeked', onSeeked)
+          v.currentTime = det.timestamp
+          setTimeout(resolve, 1500)
+        })
+
+        const canvas = document.createElement('canvas')
+        canvas.width = v.videoWidth
+        canvas.height = v.videoHeight
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
+          const [x1, y1, x2, y2] = det.bbox
+          const boxColor = det.is_overlay ? '#a855f7' : det.on_player ? '#fbbf24' : '#3b82f6'
+          ctx.lineWidth = Math.max(3, canvas.width / 400)
+          ctx.strokeStyle = boxColor
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+          ctx.font = `bold ${Math.max(16, canvas.width / 50)}px sans-serif`
+          const icon = det.is_overlay ? '[*]' : det.on_player ? '[J]' : '[V]'
+          const label = `${icon} ${det.sponsor} ${(det.confidence * 100).toFixed(0)}%`
+          const tw = ctx.measureText(label).width
+          const th = Math.max(20, canvas.width / 45)
+          ctx.fillStyle = boxColor
+          ctx.fillRect(x1, Math.max(0, y1 - th - 8), tw + 16, th + 8)
+          ctx.fillStyle = '#ffffff'
+          ctx.fillText(label, x1 + 8, Math.max(th, y1 - 10))
+
+          // toDataURL falla con SecurityError si el video esta tainted
+          setFrameDataUrl(canvas.toDataURL('image/jpeg', 0.85))
+          canvasOk = true
+        }
+      } catch (e) {
+        console.warn('Canvas capture fallo (probable taint), uso backend ffmpeg:', e)
+      }
+    }
+
+    // Intento 2 (fallback): pedir el frame al backend via ffmpeg
+    if (!canvasOk && selected) {
+      try {
+        const tok = await authFetch(`${API}/training/analyze-video/${selected}/token`).then(r => r.json())
+        const frameUrl = `${API}/training/analyze-video/${selected}/frame?seconds=${det.timestamp}&token=${tok.token}`
+        const imgRes = await fetch(frameUrl)
+        if (!imgRes.ok) throw new Error(`HTTP ${imgRes.status}`)
+        const blob = await imgRes.blob()
+        setFrameDataUrl(URL.createObjectURL(blob))
+      } catch (e: any) {
+        console.error('Backend frame fallo:', e)
+      }
+    }
+
+    setFrameLoading(false)
+  }
+
+  const closeFrameView = () => {
+    setViewingDet(null)
+    setFrameDataUrl('')
+  }
+
   const filteredDets = detections?.detections?.filter((d: any) => {
     if (filterSponsor && !d.sponsor.toLowerCase().includes(filterSponsor.toLowerCase())) return false
     if (filterSource !== 'all' && d.source !== filterSource) return false
+    if (filterSurface === 'overlay_digital' && !d.is_overlay) return false
+    if (filterSurface === 'fisico' && d.is_overlay) return false
+    if (filterEntity !== 'all' && (d.entity_id || 'sin_equipo') !== filterEntity) return false
     return true
   }) || []
 
@@ -198,9 +360,99 @@ export default function AnalyzeVideoPage() {
           </div>
         </div>
 
+        {/* Configuracion del partido (para atribucion por equipo) */}
+        {selected && (
+          <div className={`rounded-xl p-4 mb-4 border-2 ${
+            matchConfigured ? 'border-emerald-200 bg-emerald-50' : 'border-amber-300 bg-amber-50'
+          }`}>
+            <div className="flex items-start gap-3 mb-3">
+              <span className="text-xl">{matchConfigured ? '✅' : '⚠'}</span>
+              <div className="flex-1">
+                <p className={`text-sm font-semibold ${matchConfigured ? 'text-emerald-900' : 'text-amber-900'}`}>
+                  {matchConfigured
+                    ? `Partido configurado: ${selectedPartido?.local_nombre || matchForm.equipo_local} vs ${selectedPartido?.visitante_nombre || matchForm.equipo_visitante}`
+                    : 'Partido sin equipos — configura antes de analizar para atribuir logos al equipo correcto'}
+                </p>
+                <p className={`text-xs mt-0.5 ${matchConfigured ? 'text-emerald-700' : 'text-amber-800'}`}>
+                  Los colores de estos equipos se usaran para decidir de qué equipo es cada logo detectado sobre un jugador.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-600 uppercase mb-1">Equipo local</label>
+                <select value={matchForm.equipo_local}
+                  onChange={e => setMatchForm({ ...matchForm, equipo_local: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white">
+                  <option value="">—</option>
+                  {equipos.map((eq: any) => (
+                    <option key={eq.entity_id} value={eq.entity_id}>{eq.nombre}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-600 uppercase mb-1">Equipo visitante</label>
+                <select value={matchForm.equipo_visitante}
+                  onChange={e => setMatchForm({ ...matchForm, equipo_visitante: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white">
+                  <option value="">—</option>
+                  {equipos.map((eq: any) => (
+                    <option key={eq.entity_id} value={eq.entity_id}>{eq.nombre}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-600 uppercase mb-1">Torneo</label>
+                <select value={matchForm.torneo_id}
+                  onChange={e => setMatchForm({ ...matchForm, torneo_id: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white">
+                  <option value="">—</option>
+                  {torneos.map((t: any) => (
+                    <option key={t.torneo_id} value={t.torneo_id}>{t.nombre}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-600 uppercase mb-1">Estadio</label>
+                <select value={matchForm.estadio_id}
+                  onChange={e => setMatchForm({ ...matchForm, estadio_id: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white">
+                  <option value="">—</option>
+                  {estadios.map((e: any) => (
+                    <option key={e.estadio_id} value={e.estadio_id}>{e.nombre} ({e.ciudad})</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 flex-wrap">
+              <button onClick={saveMatchConfig} disabled={savingMatch}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 disabled:opacity-50">
+                {savingMatch ? 'Guardando...' : '💾 Guardar configuracion del partido'}
+              </button>
+              {matchConfigured && (
+                <button onClick={startAnalysis} disabled={isRunning}
+                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50">
+                  {isRunning ? 'Analizando...' : '🔄 Re-analizar con atribucion de equipo'}
+                </button>
+              )}
+            </div>
+
+            {saveResult && (
+              <div className={`mt-3 px-3 py-2 rounded-lg text-xs ${
+                saveResult.ok ? 'bg-emerald-100 text-emerald-900 border border-emerald-300' :
+                                'bg-red-100 text-red-900 border border-red-300'
+              }`}>
+                {saveResult.ok ? '✅ ' : '❌ '}{saveResult.msg}
+              </div>
+            )}
+          </div>
+        )}
+
         <button onClick={startAnalysis} disabled={!selected || isRunning}
           className="w-full md:w-auto px-5 py-3 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50">
-          {isRunning ? 'Analizando...' : 'Iniciar analisis'}
+          {isRunning ? 'Analizando...' : matchConfigured ? 'Iniciar analisis' : 'Iniciar analisis (sin atribucion de equipo)'}
         </button>
       </div>
 
@@ -269,7 +521,7 @@ export default function AnalyzeVideoPage() {
               </button>
             </div>
             <div className="rounded-xl overflow-hidden bg-black">
-              <video ref={videoRef} src={videoUrl!} controls preload="metadata" className="w-full max-h-[500px]" />
+              <video ref={videoRef} src={videoUrl!} controls preload="metadata" crossOrigin="anonymous" className="w-full max-h-[500px]" />
             </div>
           </div>
 
@@ -311,11 +563,203 @@ export default function AnalyzeVideoPage() {
             </p>
           </div>
 
+          {/* Superficie: fisico vs overlay digital */}
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-4">
+              5. Superficie: fisico (estadio real) vs overlay digital (computadora)
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+              <button onClick={() => setFilterSurface(filterSurface === 'fisico' ? 'all' : 'fisico')}
+                className={`rounded-xl p-4 text-left border-2 transition-all ${
+                  filterSurface === 'fisico' ? 'border-emerald-500 bg-emerald-50' : 'border-gray-100 hover:border-emerald-300'
+                }`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xl">🏟</span>
+                  <p className="text-sm font-semibold text-gray-900">Fisico en estadio</p>
+                </div>
+                <p className="text-2xl font-bold text-emerald-700">
+                  {(detections.by_surface?.fisico_camiseta || 0) + (detections.by_surface?.fisico_estadio || 0)}
+                </p>
+                <p className="text-[11px] text-gray-500">Camiseta, valla LED, banner, etc.</p>
+              </button>
+              <button onClick={() => setFilterSurface(filterSurface === 'overlay_digital' ? 'all' : 'overlay_digital')}
+                className={`rounded-xl p-4 text-left border-2 transition-all ${
+                  filterSurface === 'overlay_digital' ? 'border-purple-500 bg-purple-50' : 'border-gray-100 hover:border-purple-300'
+                }`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xl">💻</span>
+                  <p className="text-sm font-semibold text-gray-900">Overlay digital</p>
+                </div>
+                <p className="text-2xl font-bold text-purple-700">{detections.by_surface?.overlay_digital || 0}</p>
+                <p className="text-[11px] text-gray-500">Gráfico artificial del canal (TV)</p>
+              </button>
+              <div className="rounded-xl p-4 bg-gray-50 border-2 border-gray-100">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xl">👕</span>
+                  <p className="text-sm font-semibold text-gray-900">Subdivision fisica</p>
+                </div>
+                <p className="text-[11px] text-gray-600 mt-1">
+                  Camiseta: <strong>{detections.by_surface?.fisico_camiseta || 0}</strong>
+                </p>
+                <p className="text-[11px] text-gray-600">
+                  Estadio: <strong>{detections.by_surface?.fisico_estadio || 0}</strong>
+                </p>
+              </div>
+            </div>
+            <p className="text-[11px] text-gray-500 italic">
+              Un overlay se detecta cuando el mismo sponsor aparece en la MISMA posicion por varios frames, con bordes muy nitidos y colores saturados (senales de grafico generado por computadora, no fisico del estadio).
+            </p>
+          </div>
+
+          {/* Atribucion por equipo */}
+          {detections.by_entity && Object.keys(detections.by_entity).length > 0 && (
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
+              <h2 className="text-sm font-semibold text-gray-900 mb-4">
+                6. Detecciones por equipo (atribucion por color de camiseta)
+              </h2>
+              {detections.teams_available?.length === 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
+                  <p className="text-xs text-amber-800">
+                    ⚠ Este partido se registro con equipos &quot;desconocidos&quot; — la atribucion por equipo no esta disponible.
+                    Para usar esta funcion, registra el partido con <code>equipo_local</code> y <code>equipo_visitante</code> validos.
+                  </p>
+                </div>
+              )}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {Object.entries(detections.by_entity).map(([entity, count]: any) => {
+                  const isLeague = entity === "liga_1"
+                  const isUnknown = entity === "sin_equipo"
+                  const label = isLeague ? "Liga 1 (estadio/vallas)" : isUnknown ? "Sin atribuir" : entity
+                  return (
+                    <button key={entity} onClick={() => setFilterEntity(filterEntity === entity ? 'all' : entity)}
+                      className={`rounded-xl p-3 text-left border-2 transition-all ${
+                        filterEntity === entity ? 'border-orange-500 bg-orange-50' :
+                        isLeague ? 'border-blue-100 hover:border-blue-300 bg-blue-50/40' :
+                        isUnknown ? 'border-gray-100 hover:border-gray-300 bg-gray-50/40' :
+                        'border-gray-100 hover:border-orange-300'
+                      }`}>
+                      <p className="text-xs font-semibold text-gray-900 truncate">{label}</p>
+                      <p className="text-2xl font-bold text-gray-900 mt-1">{count}</p>
+                      <p className="text-[10px] text-gray-400">detecciones</p>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* MATRIZ SPONSOR × (EQUIPO / ESTADIO / OVERLAY) */}
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-1">
+              7. Matriz — ¿Qué marca aparece donde?
+            </h2>
+            <p className="text-xs text-gray-500 mb-4">
+              Vista cruzada: cada sponsor × cada equipo / estadio / overlay. Ideal para responder &quot;¿qué sponsors aparecen en camiseta de Alianza?&quot;.
+            </p>
+            {(() => {
+              const dets = detections.detections || []
+              const sponsors = Object.keys(detections.sponsors_summary || {}).sort()
+
+              // Columnas: cada equipo real + 🏟 estadio + 💻 overlay
+              const realTeams = Object.keys(detections.by_entity || {})
+                .filter(e => e !== 'liga_1' && e !== 'sin_equipo')
+                .sort()
+
+              // Construir matriz: sponsor → { jugador_<team>: n, estadio: n, overlay: n }
+              const matrix: Record<string, Record<string, number>> = {}
+              for (const sp of sponsors) matrix[sp] = {}
+              for (const d of dets) {
+                const row = matrix[d.sponsor] || (matrix[d.sponsor] = {})
+                if (d.is_overlay) {
+                  row['overlay'] = (row['overlay'] || 0) + 1
+                } else if (d.source === 'jugador' && d.entity_id) {
+                  const key = `jugador_${d.entity_id}`
+                  row[key] = (row[key] || 0) + 1
+                } else {
+                  row['estadio'] = (row['estadio'] || 0) + 1
+                }
+              }
+
+              const getTeamName = (eid: string) => equipos.find((e: any) => e.entity_id === eid)?.nombre_corto || eid
+
+              return (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-semibold text-gray-500 uppercase border-b border-gray-200 sticky left-0 bg-gray-50 z-10">
+                          Sponsor
+                        </th>
+                        {realTeams.map(team => (
+                          <th key={team} className="text-center px-3 py-2 font-semibold border-b border-gray-200">
+                            <div className="flex flex-col items-center">
+                              <span className="text-amber-700">👕 Jugador</span>
+                              <span className="text-[10px] text-gray-500">{getTeamName(team)}</span>
+                            </div>
+                          </th>
+                        ))}
+                        <th className="text-center px-3 py-2 font-semibold text-blue-700 border-b border-gray-200">
+                          <div className="flex flex-col items-center">
+                            <span>🏟 Estadio</span>
+                            <span className="text-[10px] text-gray-500">vallas/banners</span>
+                          </div>
+                        </th>
+                        <th className="text-center px-3 py-2 font-semibold text-purple-700 border-b border-gray-200">
+                          <div className="flex flex-col items-center">
+                            <span>💻 Overlay</span>
+                            <span className="text-[10px] text-gray-500">digital / TV</span>
+                          </div>
+                        </th>
+                        <th className="text-center px-3 py-2 font-semibold text-gray-900 border-b border-gray-200 bg-gray-100">
+                          Total
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sponsors.map(sp => {
+                        const row = matrix[sp] || {}
+                        const total = Object.values(row).reduce((a, b) => a + b, 0)
+                        return (
+                          <tr key={sp} className="border-b border-gray-50 hover:bg-indigo-50/40">
+                            <td className="px-3 py-2 font-mono font-bold text-gray-900 sticky left-0 bg-white z-10">
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: colorFor(sp) }} />
+                                {sp}
+                              </span>
+                            </td>
+                            {realTeams.map(team => {
+                              const n = row[`jugador_${team}`] || 0
+                              return (
+                                <td key={team} className={`px-3 py-2 text-center ${n > 0 ? 'bg-amber-50 font-bold text-amber-900' : 'text-gray-300'}`}>
+                                  {n || '—'}
+                                </td>
+                              )
+                            })}
+                            <td className={`px-3 py-2 text-center ${(row['estadio'] || 0) > 0 ? 'bg-blue-50 font-bold text-blue-900' : 'text-gray-300'}`}>
+                              {row['estadio'] || '—'}
+                            </td>
+                            <td className={`px-3 py-2 text-center ${(row['overlay'] || 0) > 0 ? 'bg-purple-50 font-bold text-purple-900' : 'text-gray-300'}`}>
+                              {row['overlay'] || '—'}
+                            </td>
+                            <td className="px-3 py-2 text-center font-bold bg-gray-50">{total}</td>
+                          </tr>
+                        )
+                      })}
+                      {sponsors.length === 0 && (
+                        <tr><td colSpan={realTeams.length + 4} className="text-center text-gray-400 py-8">Sin detecciones</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            })()}
+          </div>
+
           {/* Resumen por sponsor */}
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-semibold text-gray-900">
-                5. Resumen por sponsor
+                8. Resumen por sponsor
               </h2>
               <div className="flex gap-2">
                 <button onClick={downloadDetectionsCsv}
@@ -355,20 +799,21 @@ export default function AnalyzeVideoPage() {
           {/* Tabla detallada de detecciones */}
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-gray-900">6. Detecciones frame a frame</h2>
+              <h2 className="text-sm font-semibold text-gray-900">9. Detecciones frame a frame</h2>
               <div className="flex items-center gap-2">
                 <select value={filterSource} onChange={e => setFilterSource(e.target.value as any)}
                   className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs bg-white">
                   <option value="all">Todas las fuentes</option>
-                  <option value="jugador">Solo camiseta (jugador)</option>
+                  <option value="jugador">Solo jugadores en cancha</option>
                   <option value="estadio">Solo estadio/valla</option>
+                  <option value="tribuna_staff">Solo tribuna/staff</option>
                 </select>
                 <input type="text" value={filterSponsor} onChange={e => setFilterSponsor(e.target.value)}
                   placeholder="Filtrar por sponsor..."
                   className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs" />
-                {(filterSponsor || filterSource !== 'all') && (
-                  <button onClick={() => { setFilterSponsor(''); setFilterSource('all') }}
-                    className="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-700">Limpiar</button>
+                {(filterSponsor || filterSource !== 'all' || filterSurface !== 'all' || filterEntity !== 'all') && (
+                  <button onClick={() => { setFilterSponsor(''); setFilterSource('all'); setFilterSurface('all'); setFilterEntity('all') }}
+                    className="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-700">Limpiar todos</button>
                 )}
               </div>
             </div>
@@ -377,62 +822,85 @@ export default function AnalyzeVideoPage() {
               <table className="w-full text-xs">
                 <thead className="bg-gray-50 sticky top-0 z-10">
                   <tr className="text-left">
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Frame</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Tiempo</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Sponsor</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Fuente</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Confianza</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Tamano (px)</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Bbox</th>
-                    <th className="px-3 py-2 font-semibold text-gray-500 uppercase">Accion</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Frame</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Tiempo</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Sponsor</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Fuente</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Superficie</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Equipo</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Conf.</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Tamano</th>
+                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Accion</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredDets.slice(0, 300).map((d: any, i: number) => (
                     <tr key={i} className="border-b border-gray-50 hover:bg-indigo-50/40">
-                      <td className="px-3 py-1.5 font-mono text-gray-700">{d.frame}</td>
-                      <td className="px-3 py-1.5 font-mono text-gray-700">{d.timestamp_str || fmtTime(d.timestamp)}</td>
-                      <td className="px-3 py-1.5">
+                      <td className="px-2 py-1.5 font-mono text-gray-700">{d.frame}</td>
+                      <td className="px-2 py-1.5 font-mono text-gray-700">{d.timestamp_str || fmtTime(d.timestamp)}</td>
+                      <td className="px-2 py-1.5">
                         <span className="inline-flex items-center gap-1.5">
                           <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: colorFor(d.sponsor) }} />
                           <code className="font-semibold text-gray-900">{d.sponsor}</code>
                         </span>
                       </td>
-                      <td className="px-3 py-1.5">
+                      <td className="px-2 py-1.5">
                         {d.source === 'jugador' ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-bold">
-                            👕 Camiseta
-                            {d.player_overlap && (
-                              <span className="text-amber-600">({Math.round(d.player_overlap * 100)}%)</span>
-                            )}
+                          <span title="Jugador en cancha (césped verificado)" className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-bold">
+                            👕 {d.player_overlap ? Math.round(d.player_overlap * 100) + '%' : ''}
+                          </span>
+                        ) : d.source === 'tribuna_staff' ? (
+                          <span title={`Persona NO en cancha (césped ${Math.round((d.pitch_ratio || 0) * 100)}%)`} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-200 text-gray-700 rounded text-[10px] font-bold">
+                            👥 Staff
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-[10px] font-bold">
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded text-[10px] font-bold">
+                            🏟
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        {d.is_overlay ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-purple-100 text-purple-800 rounded text-[10px] font-bold" title={`Estable por ${d.overlay_stable_frames} frames`}>
+                            💻 Overlay
+                          </span>
+                        ) : d.surface_type === 'fisico_camiseta' ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">
+                            👕 Camiseta
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-slate-100 text-slate-700 rounded text-[10px] font-bold">
                             🏟 Estadio
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-1.5">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      <td className="px-2 py-1.5">
+                        {d.entity_id ? (
+                          <code className={`text-[10px] font-bold ${
+                            d.entity_id === 'liga_1' ? 'text-blue-700' : 'text-orange-700'
+                          }`}>{d.entity_id}</code>
+                        ) : (
+                          <span className="text-[10px] text-gray-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                           d.confidence >= 0.7 ? 'bg-emerald-100 text-emerald-700' :
                           d.confidence >= 0.5 ? 'bg-amber-100 text-amber-700' :
                           'bg-red-100 text-red-700'
-                        }`}>{(d.confidence * 100).toFixed(1)}%</span>
+                        }`}>{(d.confidence * 100).toFixed(0)}%</span>
                       </td>
-                      <td className="px-3 py-1.5 font-mono text-gray-500">{d.width}×{d.height}</td>
-                      <td className="px-3 py-1.5 font-mono text-[10px] text-gray-400">
-                        {d.bbox.join(', ')}
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <button onClick={() => seekTo(d.timestamp)}
-                          className="px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-medium hover:bg-indigo-200">
-                          Ver
+                      <td className="px-2 py-1.5 font-mono text-gray-500 text-[10px]">{d.width}×{d.height}</td>
+                      <td className="px-2 py-1.5">
+                        <button onClick={() => viewDetection(d)}
+                          className="px-2 py-0.5 bg-indigo-600 text-white rounded text-[10px] font-bold hover:bg-indigo-700">
+                          👁 Ver
                         </button>
                       </td>
                     </tr>
                   ))}
                   {filteredDets.length === 0 && (
-                    <tr><td colSpan={8} className="text-center py-8 text-gray-400">Sin resultados</td></tr>
+                    <tr><td colSpan={9} className="text-center py-8 text-gray-400">Sin resultados</td></tr>
                   )}
                 </tbody>
               </table>
@@ -446,6 +914,185 @@ export default function AnalyzeVideoPage() {
           </div>
         </>
       )}
+
+      {/* ═══ PANEL FLOTANTE: Frame + datos de la deteccion ═══ */}
+      {viewingDet && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+          onClick={closeFrameView}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full max-h-[92vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white z-10">
+              <div>
+                <h3 className="font-semibold text-gray-900">
+                  Frame {viewingDet.frame}{' '}
+                  <span className="text-gray-400">·</span>{' '}
+                  <span className="font-mono text-indigo-600">{viewingDet.timestamp_str || fmtTime(viewingDet.timestamp)}</span>
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Deteccion: <code className="font-bold text-gray-700">{viewingDet.sponsor}</code>
+                </p>
+              </div>
+              <button onClick={closeFrameView}
+                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 text-lg">
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 grid grid-cols-1 lg:grid-cols-5 gap-6">
+              {/* Imagen del frame (ocupa 3 columnas en desktop) */}
+              <div className="lg:col-span-3">
+                <div className="rounded-xl overflow-hidden bg-black border border-gray-200 aspect-video flex items-center justify-center">
+                  {frameLoading && !frameDataUrl ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <p className="text-xs text-gray-300">Capturando frame...</p>
+                    </div>
+                  ) : frameDataUrl ? (
+                    <img src={frameDataUrl} alt={`Frame ${viewingDet.frame}`} className="w-full h-full object-contain" />
+                  ) : (
+                    <p className="text-xs text-gray-400">No se pudo capturar el frame</p>
+                  )}
+                </div>
+                <div className="flex gap-2 mt-3">
+                  <button onClick={() => { seekTo(viewingDet.timestamp); closeFrameView() }}
+                    className="flex-1 px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700">
+                    ▶ Ir al video en este momento
+                  </button>
+                  {frameDataUrl && (
+                    <a href={frameDataUrl} download={`frame_${viewingDet.frame}_${viewingDet.sponsor}.jpg`}
+                      className="px-3 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50">
+                      💾 Descargar frame
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              {/* Datos de la deteccion (2 columnas) */}
+              <div className="lg:col-span-2 space-y-3">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Datos de la deteccion</p>
+
+                <DataRow label="Sponsor">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: colorFor(viewingDet.sponsor) }} />
+                    <code className="font-bold text-gray-900">{viewingDet.sponsor}</code>
+                  </span>
+                </DataRow>
+
+                <DataRow label="Confianza">
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                    viewingDet.confidence >= 0.7 ? 'bg-emerald-100 text-emerald-700' :
+                    viewingDet.confidence >= 0.5 ? 'bg-amber-100 text-amber-700' :
+                    'bg-red-100 text-red-700'
+                  }`}>{(viewingDet.confidence * 100).toFixed(1)}%</span>
+                </DataRow>
+
+                <DataRow label="Fuente">
+                  {viewingDet.source === 'jugador' ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-xs font-bold">
+                      👕 Jugador en cancha
+                      {viewingDet.player_overlap && (
+                        <span className="text-amber-600 font-normal">({Math.round(viewingDet.player_overlap * 100)}%)</span>
+                      )}
+                    </span>
+                  ) : viewingDet.source === 'tribuna_staff' ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-200 text-gray-700 rounded text-xs font-bold">
+                      👥 Tribuna / Staff (descartado)
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs font-bold">
+                      🏟 En estadio/valla
+                    </span>
+                  )}
+                </DataRow>
+
+                {(viewingDet.source === 'jugador' || viewingDet.source === 'tribuna_staff') && (
+                  <DataRow label="En cancha">
+                    {viewingDet.on_pitch ? (
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded text-xs font-bold">
+                        ✅ Sí ({Math.round((viewingDet.pitch_ratio || 0) * 100)}% césped)
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded text-xs font-bold">
+                        ❌ No ({Math.round((viewingDet.pitch_ratio || 0) * 100)}% césped)
+                      </span>
+                    )}
+                  </DataRow>
+                )}
+
+                <DataRow label="Superficie">
+                  {viewingDet.is_overlay ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-800 rounded text-xs font-bold">
+                      💻 Overlay digital
+                      {viewingDet.overlay_stable_frames > 0 && (
+                        <span className="text-purple-600 font-normal">({viewingDet.overlay_stable_frames} frames estable)</span>
+                      )}
+                    </span>
+                  ) : viewingDet.surface_type === 'fisico_camiseta' ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded text-xs font-bold">
+                      👕 Fisico en camiseta
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-700 rounded text-xs font-bold">
+                      🏟 Fisico en estadio
+                    </span>
+                  )}
+                </DataRow>
+
+                <DataRow label="Equipo atribuido">
+                  {viewingDet.entity_id ? (
+                    viewingDet.entity_id === 'liga_1' ? (
+                      <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-bold">Liga 1 (estadio)</span>
+                    ) : (
+                      <span className="px-2 py-0.5 bg-orange-100 text-orange-800 rounded text-xs font-bold">
+                        🏷 {viewingDet.entity_id}
+                        {viewingDet.color_distance && (
+                          <span className="ml-1 text-orange-600 font-normal">
+                            (dist color: {viewingDet.color_distance.toFixed(0)})
+                          </span>
+                        )}
+                      </span>
+                    )
+                  ) : (
+                    <span className="text-gray-400 text-xs">Sin atribuir</span>
+                  )}
+                </DataRow>
+
+                <div className="border-t border-gray-100 pt-3 space-y-2">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Ubicacion</p>
+                  <DataRow label="Frame nro">
+                    <code className="text-xs">{viewingDet.frame}</code>
+                  </DataRow>
+                  <DataRow label="Tiempo">
+                    <code className="text-xs font-mono text-indigo-600">{viewingDet.timestamp_str || fmtTime(viewingDet.timestamp)}</code>
+                  </DataRow>
+                  <DataRow label="Bbox">
+                    <code className="text-[10px] text-gray-500">
+                      x1={viewingDet.bbox[0]} y1={viewingDet.bbox[1]}<br/>
+                      x2={viewingDet.bbox[2]} y2={viewingDet.bbox[3]}
+                    </code>
+                  </DataRow>
+                  <DataRow label="Tamaño">
+                    <code className="text-xs">{viewingDet.width} × {viewingDet.height} px</code>
+                  </DataRow>
+                  <DataRow label="Personas en frame">
+                    <code className="text-xs">{viewingDet.persons_in_frame ?? '—'}</code>
+                  </DataRow>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DataRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-3 text-sm">
+      <span className="text-xs text-gray-500 font-medium mt-0.5 flex-shrink-0">{label}:</span>
+      <div className="text-right flex-1 min-w-0">{children}</div>
     </div>
   )
 }

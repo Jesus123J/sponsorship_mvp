@@ -7,6 +7,28 @@ from api.database import fetch_one, fetch_all, get_connection
 from api.shared.process_state import (
     DATA_DIR, VIDEOS_DIR, FRAMES_DIR, process_status, now,
 )
+from api.controllers.attribution_utils import (
+    OverlayDetector, classify_team_by_color, parse_hsv_from_db, is_on_pitch,
+)
+
+
+def _load_team_colors_for_match(match_id: str) -> dict:
+    """Carga HSV de local + visitante del partido para atribuir logos."""
+    partido = fetch_one(
+        "SELECT equipo_local, equipo_visitante FROM partidos WHERE match_id = %s",
+        (match_id,),
+    )
+    teams = {}
+    if not partido:
+        return teams
+    for team_id in (partido.get("equipo_local"), partido.get("equipo_visitante")):
+        if team_id and team_id != "desconocido":
+            row = fetch_one(
+                "SELECT color_primario_hsv FROM entidades WHERE entity_id = %s", (team_id,),
+            )
+            if row:
+                teams[team_id] = parse_hsv_from_db(row.get("color_primario_hsv"))
+    return teams
 
 
 def run_pipeline(match_id: str) -> dict:
@@ -67,21 +89,42 @@ def run_pipeline(match_id: str) -> dict:
             model = YOLO(model_path)
             person_model = YOLO('yolov8n.pt')  # COCO pre-entrenado
             frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
+
+            # Colores de los equipos del partido (para atribucion)
+            team_colors = _load_team_colors_for_match(match_id)
+            overlay_detector = OverlayDetector()
+
             all_detections = _detect_logos(
                 model, person_model, frames_dir, frame_files, match_id, fps, duration_sec, log,
+                team_colors=team_colors, overlay_detector=overlay_detector,
             )
             log.append(f"[{now()}]   -> {len(all_detections)} detecciones")
             on_player_count = sum(1 for d in all_detections if d.get("on_player"))
-            log.append(f"[{now()}]   -> {on_player_count} sobre jugador, {len(all_detections) - on_player_count} en estadio/valla")
+            tribuna_count = sum(1 for d in all_detections if d.get("source") == "tribuna_staff")
+            overlay_count = sum(1 for d in all_detections if d.get("is_overlay"))
+            log.append(f"[{now()}]   -> Filtro pitch verde: {on_player_count} jugadores reales, {tribuna_count} tribuna/staff descartados")
+            # Desglose por entity
+            by_entity: dict = {}
+            for d in all_detections:
+                eid = d.get("entity_id") or "sin_equipo"
+                by_entity[eid] = by_entity.get(eid, 0) + 1
+            log.append(f"[{now()}]   -> {on_player_count} sobre jugador, {len(all_detections) - on_player_count} estadio/valla")
+            log.append(f"[{now()}]   -> {overlay_count} overlays digitales, {len(all_detections) - overlay_count} fisicos")
+            log.append(f"[{now()}]   -> Atribucion por equipo: {by_entity}")
 
             # ── STEP 3: Clasificar posicion ──
             log.append(f"[{now()}] [3/6] Clasificando posicion...")
             process_status["pipeline"]["progress"] = "[3/6] Clasificando posicion..."
             img_h, img_w = _get_image_dimensions(frames_dir, frame_files)
             for det in all_detections:
-                det["position_type"] = _classify_position(
-                    det["bbox"], img_w, img_h, on_player=det.get("on_player", False),
-                )
+                # Si es overlay detectado, position_type = overlay_digital
+                if det.get("is_overlay"):
+                    det["position_type"] = "overlay_digital"
+                    det["context_type"] = "overlay_grafico"
+                else:
+                    det["position_type"] = _classify_position(
+                        det["bbox"], img_w, img_h, on_player=det.get("on_player", False),
+                    )
             positions = {}
             for d in all_detections:
                 positions[d["position_type"]] = positions.get(d["position_type"], 0) + 1
@@ -153,10 +196,14 @@ def _ioa(logo_bbox, person_bbox):
     return (inter / logo_area) if logo_area > 0 else 0.0
 
 
-def _detect_logos(logo_model, person_model, frames_dir, frame_files, match_id, fps, duration_sec, log):
+def _detect_logos(logo_model, person_model, frames_dir, frame_files, match_id, fps, duration_sec, log,
+                  team_colors=None, overlay_detector=None):
+    import cv2
+    team_colors = team_colors or {}
     detections = []
     for i, fname in enumerate(frame_files):
         fpath = os.path.join(frames_dir, fname)
+        frame_img = cv2.imread(fpath)
         logo_results = logo_model(fpath, verbose=False)
         # Clase 0 de COCO = person
         person_results = person_model(fpath, verbose=False, classes=[0], conf=0.3)
@@ -177,37 +224,83 @@ def _detect_logos(logo_model, person_model, frames_dir, frame_files, match_id, f
             for box in r.boxes:
                 conf = float(box.conf)
                 logo_bbox = box.xyxy[0].tolist()
+                sponsor_id = logo_model.names[int(box.cls)]
 
-                # Chequear solape con cualquier persona
+                # Chequear solape con cualquier persona + mejor candidato
                 max_overlap = 0.0
+                best_person_bbox = None
                 for pb in person_boxes:
                     ioa = _ioa(logo_bbox, pb)
                     if ioa > max_overlap:
                         max_overlap = ioa
-                on_player = max_overlap >= 0.5
-                source = "jugador" if on_player else "estadio"
+                        best_person_bbox = pb
+
+                # Filtro pitch verde: es jugador REAL solo si esta en la cancha
+                on_pitch = False
+                pitch_ratio = 0.0
+                if best_person_bbox is not None and max_overlap >= 0.5 and frame_img is not None:
+                    on_pitch, pitch_ratio = is_on_pitch(frame_img, best_person_bbox)
+
+                on_player = max_overlap >= 0.5 and on_pitch
+                # Distinguir: hincha/staff que se solapa con el logo pero NO esta en cancha
+                if max_overlap >= 0.5 and not on_pitch:
+                    source = "tribuna_staff"
+                else:
+                    source = "jugador" if on_player else "estadio"
+
+                # Atribucion por equipo (solo si es JUGADOR REAL en la cancha)
+                entity_id = None
+                entity_type = None
+                color_distance = None
+                if on_player and team_colors and frame_img is not None:
+                    entity_id, color_distance = classify_team_by_color(frame_img, logo_bbox, team_colors)
+                    entity_type = "club"
+                elif source == "tribuna_staff":
+                    # Hincha/staff: atribuir a liga porque no es camiseta oficial de equipo
+                    entity_id = "liga_1"
+                    entity_type = "league"
+                else:
+                    # Logos en vallas/estadio (sin persona) se atribuyen a la liga
+                    entity_id = "liga_1"
+                    entity_type = "league"
+
+                # Deteccion overlay vs fisico
+                surface_info = {"surface_type": "fisico_estadio", "is_overlay": False,
+                                "stable_frames": 0, "signals": {}}
+                if overlay_detector is not None and frame_img is not None:
+                    surface_info = overlay_detector.classify(
+                        frame_img, sponsor_id, i, logo_bbox, on_player,
+                    )
 
                 detections.append({
                     "match_id": match_id,
                     "frame_number": second * int(fps),
                     "timestamp_seg": second,
-                    "sponsor_id": logo_model.names[int(box.cls)],
+                    "sponsor_id": sponsor_id,
                     "confidence": conf,
                     "bbox": logo_bbox,
                     "position_type": "desconocido",
                     "context_type": "juego_vivo",
                     "context_multiplier": 1.0,
-                    "entity_id": None, "entity_type": None, "localidad": None,
+                    "entity_id": entity_id,
+                    "entity_type": entity_type,
+                    "localidad": None,
+                    "color_distancia": round(color_distance, 2) if color_distance is not None else None,
                     "match_period": "primera_mitad" if second < duration_sec / 2 else "segunda_mitad",
                     "match_minute": second // 60,
                     "qi_score": 0.0, "smv_parcial": 0.0,
                     "aprobada": 1 if conf >= 0.5 else 0,
                     "zona_confianza": "verde" if conf >= 0.7 else ("amarilla" if conf >= 0.5 else "roja"),
-                    # ── NUEVO: fuente de la deteccion ──
+                    # Fuente y superficie
                     "on_player": on_player,
                     "player_overlap": round(max_overlap, 3),
+                    "on_pitch": on_pitch,
+                    "pitch_ratio": pitch_ratio,
                     "source": source,
                     "persons_in_frame": len(person_boxes),
+                    "surface_type": surface_info["surface_type"],
+                    "is_overlay": surface_info["is_overlay"],
+                    "overlay_signals": surface_info.get("signals", {}),
                 })
 
         if (i + 1) % 100 == 0:

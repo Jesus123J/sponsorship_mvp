@@ -83,6 +83,9 @@ app.include_router(pipeline.router, prefix="/api/training", tags=["Pipeline Dete
 from api.routers import analyze
 app.include_router(analyze.router, prefix="/api/training", tags=["Analizar Video"])
 
+from api.routers import catalog
+app.include_router(catalog.router, prefix="/api/catalog", tags=["Catalogo"])
+
 
 @app.get("/api/health")
 def health():

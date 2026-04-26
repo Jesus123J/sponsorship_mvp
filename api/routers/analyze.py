@@ -103,3 +103,38 @@ def download_annotated(match_id: str, current_user: dict = Depends(require_admin
     if not path:
         raise HTTPException(status_code=404, detail="Video anotado no encontrado")
     return FileResponse(path, media_type='video/mp4', filename=f'{match_id}_annotated.mp4')
+
+
+@router.get("/analyze-video/{match_id}/frame")
+def get_frame_jpeg(match_id: str, seconds: float, token: str = None):
+    """Extrae un frame especifico del video ANOTADO usando ffmpeg y lo devuelve como JPEG.
+    Usa el mismo token temporal del stream.
+    """
+    if not token or token not in _tokens:
+        raise HTTPException(status_code=403, detail="Token requerido")
+    tdata = _tokens[token]
+    if tdata["match_id"] != match_id or tdata["expires"] < time.time():
+        raise HTTPException(status_code=403, detail="Token invalido o expirado")
+
+    import os, subprocess, tempfile
+    video_path = ctrl.get_annotated_video_path(match_id)
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Video no encontrado")
+
+    out_path = tempfile.mktemp(suffix='.jpg')
+    try:
+        result = subprocess.run([
+            'ffmpeg', '-y', '-ss', str(max(0, seconds)), '-i', video_path,
+            '-frames:v', '1', '-q:v', '3', out_path,
+        ], capture_output=True, text=True, timeout=15)
+        if result.returncode != 0 or not os.path.exists(out_path):
+            raise HTTPException(status_code=500, detail=f"ffmpeg fallo: {result.stderr[-200:]}")
+        from fastapi.responses import Response
+        with open(out_path, 'rb') as f:
+            data = f.read()
+        os.remove(out_path)
+        return Response(content=data, media_type='image/jpeg', headers={
+            'Cache-Control': 'public, max-age=60',
+        })
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout extrayendo frame")
