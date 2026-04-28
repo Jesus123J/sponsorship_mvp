@@ -18,6 +18,9 @@ process_status = {
     "extract": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
     "zip": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
     "analyze": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
+    "trim": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None, "percent": 0},
+    "batch_detect": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None, "percent": 0},
+    "package": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None, "percent": 0},
 }
 
 # Tareas R2 (upload/download): { task_id: { running, progress, transferred_mb, total_mb, ... } }

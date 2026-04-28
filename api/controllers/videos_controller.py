@@ -3,6 +3,7 @@ import os
 import zipfile
 import threading
 import subprocess
+import time
 from datetime import datetime
 from api.shared.process_state import (
     DATA_DIR, VIDEOS_DIR, FRAMES_DIR, process_status, now,
@@ -10,10 +11,13 @@ from api.shared.process_state import (
 
 
 def trim_video(source_match_id: str, output_match_id: str, start_seconds: float, duration_seconds: float) -> dict:
-    """Corta un video existente usando ffmpeg (copy, sin recodificar).
+    """Inicia corte de video en BACKGROUND y retorna inmediatamente.
 
-    Devuelve {match_id, size_mb, path, duration_seg, start_seg}.
+    El progreso se actualiza en process_status['trim'] con percent y log.
     """
+    if process_status.get("trim", {}).get("running"):
+        return {"error": "Ya hay un corte de video en curso", "status": 409}
+
     src_path = os.path.join(VIDEOS_DIR, f'{source_match_id}.mp4')
     if not os.path.exists(src_path):
         return {"error": f"Video fuente no encontrado: {source_match_id}", "status": 404}
@@ -35,51 +39,115 @@ def trim_video(source_match_id: str, output_match_id: str, start_seconds: float,
 
     os.makedirs(VIDEOS_DIR, exist_ok=True)
 
-    # -ss antes de -i = busqueda rapida en keyframes (copy-safe)
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", str(start_seconds),
-        "-i", src_path,
-        "-t", str(duration_seconds),
-        "-c", "copy",
-        "-avoid_negative_ts", "make_zero",
-        dst_path,
-    ]
+    process_status["trim"] = {
+        "running": True,
+        "progress": "Iniciando corte...",
+        "percent": 0,
+        "log": [],
+        "match_id": output_match_id,
+        "finished_at": None,
+        "error": None,
+    }
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            # Si falla con -c copy (keyframes no alineados), reintenta recodificando
-            cmd_reencode = [
+    def worker():
+        log = process_status["trim"]["log"]
+        try:
+            log.append(f"[{now()}] Cortando {source_match_id}.mp4 → {output_match_id}.mp4 ({duration_seconds}s desde {start_seconds}s)")
+            # Intento 1: copy (rapido)
+            cmd = [
                 "ffmpeg", "-y",
-                "-ss", str(start_seconds),
-                "-i", src_path,
-                "-t", str(duration_seconds),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac",
+                "-ss", str(start_seconds), "-i", src_path,
+                "-t", str(duration_seconds), "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-progress", "pipe:1", "-nostats",
                 dst_path,
             ]
-            result = subprocess.run(cmd_reencode, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0:
-                return {"error": f"ffmpeg fallo: {result.stderr[-300:]}", "status": 500}
-    except subprocess.TimeoutExpired:
-        return {"error": "Timeout al cortar video", "status": 500}
-    except FileNotFoundError:
-        return {"error": "ffmpeg no esta instalado en el servidor", "status": 500}
+            ok = _run_ffmpeg_with_progress(cmd, duration_seconds, log)
 
-    if not os.path.exists(dst_path):
-        return {"error": "El video cortado no se genero", "status": 500}
+            if not ok:
+                log.append(f"[{now()}] -c copy fallo, reintentando con re-encode...")
+                if os.path.exists(dst_path):
+                    os.remove(dst_path)
+                cmd2 = [
+                    "ffmpeg", "-y",
+                    "-ss", str(start_seconds), "-i", src_path,
+                    "-t", str(duration_seconds),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac",
+                    "-progress", "pipe:1", "-nostats",
+                    dst_path,
+                ]
+                ok = _run_ffmpeg_with_progress(cmd2, duration_seconds, log)
 
-    size_mb = round(os.path.getsize(dst_path) / (1024 * 1024), 2)
+            if not ok or not os.path.exists(dst_path):
+                process_status["trim"]["error"] = "ffmpeg fallo, ver log"
+                process_status["trim"]["progress"] = "Error en ffmpeg"
+                return
+
+            size_mb = round(os.path.getsize(dst_path) / (1024 * 1024), 2)
+            log.append(f"[{now()}] -> {size_mb} MB, listo")
+            process_status["trim"]["percent"] = 100
+            process_status["trim"]["progress"] = f"Completado — {size_mb} MB"
+            process_status["trim"]["size_mb"] = size_mb
+            process_status["trim"]["filename"] = f"{output_match_id}.mp4"
+            process_status["trim"]["finished_at"] = now()
+        except Exception as e:
+            process_status["trim"]["error"] = str(e)
+            log.append(f"[{now()}] ERROR: {e}")
+        finally:
+            process_status["trim"]["running"] = False
+
+    threading.Thread(target=worker, daemon=True).start()
     return {
-        "message": "Video cortado exitosamente",
+        "message": "Corte iniciado en background",
         "match_id": output_match_id,
         "source_match_id": source_match_id,
-        "size_mb": size_mb,
-        "start_seg": start_seconds,
         "duration_seg": duration_seconds,
-        "filename": f"{output_match_id}.mp4",
+        "start_seg": start_seconds,
     }
+
+
+def _run_ffmpeg_with_progress(cmd: list, total_duration_sec: float, log: list) -> bool:
+    """Corre ffmpeg parseando -progress pipe:1 y actualizando percent."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stderr_lines = []
+
+        # Lee stdout linea por linea para capturar progress
+        while True:
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line:
+                if proc.poll() is not None:
+                    break
+                continue
+            line = line.strip()
+            if line.startswith("out_time_ms="):
+                try:
+                    micro = int(line.split("=")[1])
+                    seconds = micro / 1_000_000
+                    pct = min(99, int((seconds / total_duration_sec) * 100))
+                    process_status["trim"]["percent"] = pct
+                    process_status["trim"]["progress"] = f"Cortando {pct}%..."
+                except Exception:
+                    pass
+
+        # Capturar stderr al final (errores)
+        if proc.stderr:
+            stderr_lines = proc.stderr.read().splitlines()
+        if proc.returncode != 0:
+            log.append(f"   stderr: {' '.join(stderr_lines[-3:])[:200]}")
+            return False
+        return True
+    except FileNotFoundError:
+        log.append("   ffmpeg no esta instalado")
+        return False
+    except Exception as e:
+        log.append(f"   excepcion: {e}")
+        return False
+
+
+def get_trim_status() -> dict:
+    return process_status.get("trim", {"running": False})
 
 
 def get_video_info(match_id: str) -> dict:

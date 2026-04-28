@@ -52,6 +52,16 @@ async def batch_auto_detect(match_id: str, request: Request,
     return r
 
 
+@router.get("/batch-auto-detect/status")
+def batch_status(current_user: dict = Depends(require_admin)):
+    return ctrl.get_batch_detect_status()
+
+
+@router.get("/package/status")
+def package_status(current_user: dict = Depends(require_admin)):
+    return ctrl.get_package_status()
+
+
 @router.get("/{match_id}/frames")
 def list_frames(match_id: str, page: int = 1, per_page: int = 60,
                 current_user: dict = Depends(get_current_user)):
@@ -111,20 +121,47 @@ async def package_and_train(request: Request,
     batch = int(data.get('batch', 16))
 
     only_untrained = bool(data.get('only_untrained', False))
+    use_async = bool(data.get('async', True))  # default async ahora
+
+    if use_async:
+        # Empaqueta en background; el frontend hace polling de /package/status
+        # y al terminar lanza el train aparte
+        pkg = ctrl.package_to_yolo_async(
+            match_id=match_id,
+            frame_seconds=frame_seconds,
+            limit=limit if limit is None else int(limit),
+            only_untrained=only_untrained,
+        )
+        if "error" in pkg:
+            raise HTTPException(pkg.get("status", 500), pkg["error"])
+        # Si auto_train, lanza el train cuando el package termine (en otro thread)
+        if auto_train:
+            import threading, time
+            from api.controllers import training_controller
+            from api.shared.process_state import process_status
+
+            def auto_train_when_ready():
+                # Espera a que el package termine
+                while process_status.get("package", {}).get("running"):
+                    time.sleep(1)
+                pkg_result = process_status.get("package", {}).get("result", {})
+                if pkg_result and pkg_result.get("ready_to_train"):
+                    training_controller.start_training(epochs, imgsz, batch)
+            threading.Thread(target=auto_train_when_ready, daemon=True).start()
+        return pkg
+
+    # Modo sincrono (legacy)
     pkg = ctrl.package_to_yolo(
-        match_id=match_id,
-        frame_seconds=frame_seconds,
+        match_id=match_id, frame_seconds=frame_seconds,
         limit=limit if limit is None else int(limit),
         only_untrained=only_untrained,
     )
     if "error" in pkg:
         raise HTTPException(pkg.get("status", 500), pkg["error"])
-
     if auto_train and pkg.get("ready_to_train"):
         from api.controllers import training_controller
         train_result = training_controller.start_training(epochs, imgsz, batch)
         pkg["training_started"] = train_result
-
     return pkg
 
 

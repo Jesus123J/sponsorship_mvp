@@ -68,6 +68,11 @@ def trim_video(req: TrimVideoRequest, current_user: dict = Depends(require_admin
     return result
 
 
+@router.get("/trim-video/status")
+def trim_status(current_user: dict = Depends(require_admin)):
+    return ctrl.get_trim_status()
+
+
 @router.get("/video/{match_id}/info")
 def video_info(match_id: str, current_user: dict = Depends(require_admin)):
     result = ctrl.get_video_info(match_id)

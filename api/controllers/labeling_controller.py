@@ -178,7 +178,12 @@ def create_class(sponsor_id: str, nombre: str = None, categoria: str = "custom")
 
 
 def batch_auto_detect(match_id: str, seconds: list, conf: float = 0.25) -> dict:
-    """Corre auto-detect en varios frames de un solo tiro y guarda las anotaciones."""
+    """Inicia auto-detect en BACKGROUND para varios frames. Progress en process_status['batch_detect']."""
+    import threading
+    from api.shared.process_state import process_status, now
+
+    if process_status.get("batch_detect", {}).get("running"):
+        return {"error": "Ya hay un batch auto-detect en curso", "status": 409}
     if not seconds:
         return {"error": "Lista de seconds vacia", "status": 400}
 
@@ -186,47 +191,137 @@ def batch_auto_detect(match_id: str, seconds: list, conf: float = 0.25) -> dict:
     if not os.path.exists(model_path):
         return {"error": "Modelo entrenado no existe", "status": 400}
 
-    mtime = os.path.getmtime(model_path)
-    if _yolo_cache["path"] != model_path or _yolo_cache["mtime"] != mtime:
-        from ultralytics import YOLO
-        _yolo_cache["model"] = YOLO(model_path)
-        _yolo_cache["path"] = model_path
-        _yolo_cache["mtime"] = mtime
-    model = _yolo_cache["model"]
+    process_status["batch_detect"] = {
+        "running": True,
+        "progress": f"Iniciando auto-detect en {len(seconds)} frames...",
+        "percent": 0,
+        "log": [],
+        "match_id": match_id,
+        "total_frames": len(seconds),
+        "frames_processed": 0,
+        "total_boxes_added": 0,
+        "finished_at": None,
+        "error": None,
+    }
 
-    results_summary = []
-    total_boxes = 0
-    for second in seconds:
-        img_path = os.path.join(FRAMES_DIR, match_id, f'frame_{second:05d}.jpg')
-        if not os.path.exists(img_path):
-            continue
-        results = model(img_path, verbose=False, conf=conf)
-        boxes = []
-        for r in results:
-            if r.boxes is None:
-                continue
-            for box in r.boxes:
-                x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
-                cls_id = int(box.cls)
-                boxes.append({
-                    "class": model.names[cls_id],
-                    "x": round(x1, 1),
-                    "y": round(y1, 1),
-                    "w": round(x2 - x1, 1),
-                    "h": round(y2 - y1, 1),
-                    "confidence": round(float(box.conf), 3),
-                })
-        # Guardar como anotaciones (auto-aprobadas)
-        save_frame_annotations(match_id, second, boxes)
-        results_summary.append({"second": second, "boxes": len(boxes)})
-        total_boxes += len(boxes)
+    def worker():
+        log = process_status["batch_detect"]["log"]
+        try:
+            mtime = os.path.getmtime(model_path)
+            if _yolo_cache["path"] != model_path or _yolo_cache["mtime"] != mtime:
+                from ultralytics import YOLO
+                _yolo_cache["model"] = YOLO(model_path)
+                _yolo_cache["path"] = model_path
+                _yolo_cache["mtime"] = mtime
+            model = _yolo_cache["model"]
 
+            log.append(f"[{now()}] Auto-detect en {len(seconds)} frames con conf={conf}")
+            total_boxes = 0
+            for i, second in enumerate(seconds):
+                img_path = os.path.join(FRAMES_DIR, match_id, f'frame_{second:05d}.jpg')
+                if not os.path.exists(img_path):
+                    continue
+                results = model(img_path, verbose=False, conf=conf)
+                boxes = []
+                for r in results:
+                    if r.boxes is None:
+                        continue
+                    for box in r.boxes:
+                        x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
+                        boxes.append({
+                            "class": model.names[int(box.cls)],
+                            "x": round(x1, 1), "y": round(y1, 1),
+                            "w": round(x2 - x1, 1), "h": round(y2 - y1, 1),
+                            "confidence": round(float(box.conf), 3),
+                        })
+                save_frame_annotations(match_id, second, boxes)
+                total_boxes += len(boxes)
+
+                pct = int(((i + 1) / len(seconds)) * 100)
+                process_status["batch_detect"]["percent"] = pct
+                process_status["batch_detect"]["frames_processed"] = i + 1
+                process_status["batch_detect"]["total_boxes_added"] = total_boxes
+                process_status["batch_detect"]["progress"] = f"{i + 1}/{len(seconds)} frames procesados ({pct}%)"
+
+            log.append(f"[{now()}] -> {len(seconds)} frames, {total_boxes} cajas agregadas")
+            process_status["batch_detect"]["progress"] = f"Completado — {total_boxes} cajas en {len(seconds)} frames"
+            process_status["batch_detect"]["finished_at"] = now()
+        except Exception as e:
+            process_status["batch_detect"]["error"] = str(e)
+            log.append(f"[{now()}] ERROR: {e}")
+        finally:
+            process_status["batch_detect"]["running"] = False
+
+    threading.Thread(target=worker, daemon=True).start()
     return {
         "match_id": match_id,
-        "frames_processed": len(results_summary),
-        "total_boxes_added": total_boxes,
-        "frames": results_summary,
+        "started": True,
+        "total_frames": len(seconds),
     }
+
+
+def get_batch_detect_status() -> dict:
+    from api.shared.process_state import process_status
+    return process_status.get("batch_detect", {"running": False})
+
+
+def package_to_yolo_async(match_id: str | None = None,
+                           frame_seconds: list | None = None,
+                           limit: int | None = None,
+                           only_with_boxes: bool = True,
+                           only_untrained: bool = False) -> dict:
+    """Inicia empaquetado en BACKGROUND con progress."""
+    import threading
+    from api.shared.process_state import process_status, now
+
+    if process_status.get("package", {}).get("running"):
+        return {"error": "Ya hay un empaquetado en curso", "status": 409}
+
+    process_status["package"] = {
+        "running": True,
+        "progress": "Iniciando empaquetado...",
+        "percent": 0,
+        "log": [],
+        "finished_at": None,
+        "error": None,
+        "result": None,
+    }
+
+    def worker():
+        log = process_status["package"]["log"]
+        try:
+            log.append(f"[{now()}] Empaquetando dataset YOLO...")
+            process_status["package"]["progress"] = "Procesando anotaciones..."
+            result = package_to_yolo(
+                match_id=match_id, frame_seconds=frame_seconds,
+                limit=limit, only_with_boxes=only_with_boxes, only_untrained=only_untrained,
+            )
+            if "error" in result:
+                process_status["package"]["error"] = result["error"]
+                log.append(f"[{now()}] ERROR: {result['error']}")
+            else:
+                process_status["package"]["result"] = result
+                process_status["package"]["percent"] = 100
+                process_status["package"]["progress"] = (
+                    f"Completado — {result.get('total_images', 0)} imagenes, "
+                    f"{result.get('total_boxes', 0)} cajas, "
+                    f"{result.get('frames_marked_trained', 0)} marcadas como entrenadas"
+                )
+                log.append(f"[{now()}] {process_status['package']['progress']}")
+            process_status["package"]["finished_at"] = now()
+        except Exception as e:
+            process_status["package"]["error"] = str(e)
+            log.append(f"[{now()}] EXCEPCION: {e}")
+        finally:
+            process_status["package"]["running"] = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"started": True, "message": "Empaquetado iniciado en background"}
+
+
+def get_package_status() -> dict:
+    from api.shared.process_state import process_status
+    return process_status.get("package", {"running": False})
 
 
 def auto_detect_frame(match_id: str, second: int, conf: float = 0.25) -> dict:
