@@ -1,8 +1,11 @@
 version: "3.8"
 
 # ╔══════════════════════════════════════════════════════════╗
-# ║  SIN contenedor MySQL — usa tu BD local existente       ║
-# ║  Los datos en data/ son PERSISTENTES (volumen montado)  ║
+# ║  DESARROLLO LOCAL                                        ║
+# ║  - ENV=development                                       ║
+# ║  - MySQL en tu PC (host.docker.internal)                 ║
+# ║  - Frontend apunta a localhost:8000                      ║
+# ║  - Para producción usar: docker-compose.prod.yml         ║
 # ╚══════════════════════════════════════════════════════════╝
 
 services:
@@ -16,39 +19,40 @@ services:
     ports:
       - "8000:8000"
     environment:
-      ENV: production
-      # Conexion a tu MySQL LOCAL (host.docker.internal = tu PC siempre)
+      ENV: development            # ← desarrollo local
       DB_HOST: ${DB_HOST:-host.docker.internal}
       DB_USER: ${DB_USER:-root}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME:-sponsorship_mvp}
       DB_PORT: ${DB_PORT:-3306}
       DB_POOL_SIZE: 10
-      JWT_SECRET: ${JWT_SECRET:-cambia-este-secreto}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-not-for-production-32-chars-minimum-required}
       JWT_EXPIRE_HOURS: 24
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       RATE_LIMIT_PER_MINUTE: 60
     volumes:
-      # ⚠️ CLAVE: monta data/ como volumen
-      # Si paras o borras el contenedor, tus datos SIGUEN en tu disco
       - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 90s
 
   # ── Frontend Web ──
   web:
     build:
       context: ./web
       dockerfile: Dockerfile
+      args:
+        # IMPORTANTE: debe terminar en /api porque el codigo hace `${API}/training/...`
+        NEXT_PUBLIC_API_URL: http://localhost:8000/api
     container_name: sponsorship_web
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started

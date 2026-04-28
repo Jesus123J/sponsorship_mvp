@@ -475,13 +475,13 @@ jobs:
             git fetch --all
             git reset --hard "origin/$BRANCH"
 
-            # ── 4. Generar .env si no existe ──
+            # ── 4. Generar/Actualizar .env ──
+            PUBLIC_IP=$(curl -s ifconfig.me || echo "${{ secrets.VPS_HOST }}")
             if [ ! -f .env ]; then
               echo "==> Primera vez — generando .env..."
               cp .env.production.example .env
               DB_PASS=$(openssl rand -hex 16)
               JWT_KEY=$(openssl rand -hex 32)
-              PUBLIC_IP=$(curl -s ifconfig.me || echo "${{ secrets.VPS_HOST }}")
               sed -i "s|cambiar_este_password_super_seguro|$DB_PASS|g" .env
               sed -i "s|cambiar_este_secreto_de_minimo_64_caracteres_aleatorios|$JWT_KEY|g" .env
               sed -i "s|45.88.191.29|$PUBLIC_IP|g" .env
@@ -490,6 +490,14 @@ jobs:
               echo "JWT_SECRET=$JWT_KEY" >> /root/.deploy_credentials.txt
               chmod 600 /root/.deploy_credentials.txt
             fi
+
+            # ── 4b. Asegurar que CORS_ORIGINS y NEXT_PUBLIC_API_URL apunten a la IP publica ──
+            # NEXT_PUBLIC_API_URL DEBE terminar en /api (el codigo hace `${API}/training/...`)
+            echo "==> Verificando URLs publicas en .env..."
+            grep -q "^CORS_ORIGINS=" .env || echo "CORS_ORIGINS=http://$PUBLIC_IP:3000" >> .env
+            grep -q "^NEXT_PUBLIC_API_URL=" .env || echo "NEXT_PUBLIC_API_URL=http://$PUBLIC_IP:8000/api" >> .env
+            sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://$PUBLIC_IP:3000|" .env
+            sed -i "s|^NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=http://$PUBLIC_IP:8000/api|" .env
 
             # ── 5. Build + arrancar ──
             echo "==> Build + start contenedores..."

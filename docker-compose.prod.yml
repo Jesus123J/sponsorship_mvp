@@ -71,6 +71,11 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+      args:
+        # IMPORTANTE: Next.js compila NEXT_PUBLIC_* en el bundle al BUILD time,
+        # por eso pasamos como build arg (no solo env). Sin esto el frontend usa
+        # localhost:8000 en vez de la IP publica del VPS.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: sponsorship_web
     restart: unless-stopped
     ports:
