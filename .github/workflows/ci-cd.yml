@@ -61,6 +61,14 @@ jobs:
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/tabla_sesiones.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/indices_optimizacion.sql
 
+          # Aplicar migraciones (es_prueba, estadios, torneos, secondary colors)
+          if [ -d sql/migrations ]; then
+            for f in sql/migrations/*.sql; do
+              echo "Aplicando $(basename $f)..."
+              mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < "$f" 2>&1 | grep -v "Duplicate" || true
+            done
+          fi
+
           # Crear usuario admin de test con hash generado aqui
           HASH=$(python -c "import bcrypt; print(bcrypt.hashpw(b'demo2025', bcrypt.gensalt()).decode())")
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp -e "
@@ -73,7 +81,7 @@ jobs:
             ('admin@sponsorshipmvp.pe', '$HASH', 'Administrador Liga 1', 'admin', NULL),
             ('cliente@test.pe', '$HASH', 'Cliente Test', 'client', 'apuesta_total');
           "
-          echo "BD de test lista con usuario admin"
+          echo "BD de test lista con migraciones aplicadas"
 
       - name: Test 1 — Imports y estructura
         run: |
@@ -273,13 +281,15 @@ jobs:
             -d '{"email":"","password":"123456"}')
           [ "$CODE" = "422" ] && echo "PASS — Email vacio rechazado (422)"
 
-      - name: Test 9 — Rate limiting
+      - name: Test 9 — Rate limiting (solo en /auth/login)
         run: |
-          # Hacer 65 requests rapidos (limite es 60/min)
+          # El rate limit solo aplica a /api/auth/login para evitar brute-force
           for i in $(seq 1 65); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/plans/)
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/auth/login \
+              -H "Content-Type: application/json" \
+              -d '{"email":"noexiste@test.com","password":"abc123"}')
             if [ "$CODE" = "429" ]; then
-              echo "PASS — Rate limit activo despues de $i requests (HTTP 429)"
+              echo "PASS — Rate limit en login activo despues de $i requests (HTTP 429)"
               exit 0
             fi
           done
