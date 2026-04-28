@@ -100,6 +100,9 @@ app.include_router(catalog.router, prefix="/api/catalog", tags=["Catalogo"])
 from api.routers import labeling
 app.include_router(labeling.router, prefix="/api/labeling", tags=["Etiquetado"])
 
+from api.routers import storage
+app.include_router(storage.router, prefix="/api/storage", tags=["Cloud Storage R2"])
+
 
 @app.get("/api/health")
 def health():

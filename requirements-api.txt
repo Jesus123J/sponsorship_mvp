@@ -19,3 +19,6 @@ opencv-python-headless>=4.8
 
 # --- YOLO training + inference ---
 ultralytics>=8.0
+
+# --- Cloudflare R2 / S3-compatible storage ---
+boto3>=1.34
