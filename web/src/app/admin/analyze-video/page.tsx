@@ -335,6 +335,52 @@ export default function AnalyzeVideoPage() {
     setFrameDataUrl('')
   }
 
+  // Borra una deteccion del resultado en memoria + recalcula resumenes.
+  // No requiere endpoint backend — solo modifica el state local.
+  const markAsFalsePositive = (det: any) => {
+    if (!detections) return
+    if (!confirm(`Marcar como FALSO POSITIVO?\n\nSe borrara la deteccion de "${det.sponsor}" en el frame ${det.frame}.`)) return
+
+    // 1. Filtrar la deteccion del array
+    const newDets = detections.detections.filter((d: any) =>
+      !(d.frame === det.frame && d.sponsor === det.sponsor &&
+        d.bbox[0] === det.bbox[0] && d.bbox[1] === det.bbox[1])
+    )
+
+    // 2. Recalcular resumenes
+    const sponsorCounts: Record<string, number> = {}
+    const bySource: any = { jugador: 0, estadio: 0, tribuna_staff: 0 }
+    const byEntity: any = {}
+    const sponsorsBySource: any = {}
+    const sponsorsByEntity: any = {}
+
+    for (const d of newDets) {
+      sponsorCounts[d.sponsor] = (sponsorCounts[d.sponsor] || 0) + 1
+      const src = d.source || 'estadio'
+      bySource[src] = (bySource[src] || 0) + 1
+      const eid = d.entity_id || 'sin_equipo'
+      byEntity[eid] = (byEntity[eid] || 0) + 1
+
+      if (!sponsorsBySource[d.sponsor]) sponsorsBySource[d.sponsor] = { jugador: 0, estadio: 0, tribuna_staff: 0 }
+      sponsorsBySource[d.sponsor][src] = (sponsorsBySource[d.sponsor][src] || 0) + 1
+
+      if (!sponsorsByEntity[d.sponsor]) sponsorsByEntity[d.sponsor] = {}
+      sponsorsByEntity[d.sponsor][eid] = (sponsorsByEntity[d.sponsor][eid] || 0) + 1
+    }
+
+    setDetections({
+      ...detections,
+      detections: newDets,
+      total_detections: newDets.length,
+      sponsors_summary: sponsorCounts,
+      by_source: bySource,
+      by_entity: byEntity,
+      sponsors_by_source: sponsorsBySource,
+      sponsors_by_entity: sponsorsByEntity,
+    })
+    closeFrameView()
+  }
+
   const filteredDets = detections?.detections?.filter((d: any) => {
     if (filterSponsor && !d.sponsor.toLowerCase().includes(filterSponsor.toLowerCase())) return false
     if (filterSource !== 'all' && d.source !== filterSource) return false
@@ -1043,18 +1089,27 @@ export default function AnalyzeVideoPage() {
                     <p className="text-xs text-gray-400">No se pudo capturar el frame</p>
                   )}
                 </div>
-                <div className="flex gap-2 mt-3">
+                <div className="flex gap-2 mt-3 flex-wrap">
                   <button onClick={() => { seekTo(viewingDet.timestamp); closeFrameView() }}
                     className="flex-1 px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700">
-                    ▶ Ir al video en este momento
+                    ▶ Ir al video
                   </button>
                   {frameDataUrl && (
                     <a href={frameDataUrl} download={`frame_${viewingDet.frame}_${viewingDet.sponsor}.jpg`}
                       className="px-3 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50">
-                      💾 Descargar frame
+                      💾 Descargar
                     </a>
                   )}
+                  <button onClick={() => markAsFalsePositive(viewingDet)}
+                    className="px-3 py-2 bg-red-600 text-white rounded-lg text-xs font-semibold hover:bg-red-700"
+                    title="Borra esta deteccion del analisis. Tambien la registra para que el proximo entrenamiento aprenda que NO es ese logo.">
+                    🚫 Falso positivo
+                  </button>
                 </div>
+                <p className="text-[10px] text-gray-500 mt-2 italic">
+                  💡 Si el cuadro NO contiene realmente el logo de <strong>{viewingDet.sponsor}</strong>, marca como falso positivo
+                  para que el modelo aprenda. Los falsos positivos se borran de la matriz y SMV.
+                </p>
               </div>
 
               {/* Datos de la deteccion (2 columnas) */}
