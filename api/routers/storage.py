@@ -25,7 +25,7 @@ def list_models(current_user: dict = Depends(require_admin)):
 
 @router.post("/models/upload")
 async def upload_current_model(request: Request, current_user: dict = Depends(require_admin)):
-    """Sube el best.pt actual a R2 con un version tag."""
+    """Lanza upload async del best.pt. Retorna task_id para polling."""
     if not ctrl.is_configured():
         raise HTTPException(503, "R2 no configurado")
     raw = await request.body()
@@ -36,7 +36,7 @@ async def upload_current_model(request: Request, current_user: dict = Depends(re
     if not os.path.exists(pt_path):
         raise HTTPException(404, "best.pt no existe localmente. Entrena primero.")
 
-    r = ctrl.upload_model(pt_path, version)
+    r = ctrl.upload_model_async(pt_path, version)
     if "error" in r:
         raise HTTPException(r.get("status", 500), r["error"])
     return r
@@ -77,7 +77,7 @@ def upload_video(match_id: str, current_user: dict = Depends(require_admin)):
     video_path = os.path.join(DATA_DIR, "videos", f"{match_id}.mp4")
     if not os.path.exists(video_path):
         raise HTTPException(404, f"Video no existe: {match_id}.mp4")
-    r = ctrl.upload_video(video_path, match_id)
+    r = ctrl.upload_video_async(video_path, match_id)
     if "error" in r:
         raise HTTPException(r.get("status", 500), r["error"])
     return r
@@ -125,7 +125,7 @@ def browse_all(current_user: dict = Depends(require_admin)):
 
 @router.post("/import-video")
 async def import_video(request: Request, current_user: dict = Depends(require_admin)):
-    """Descarga un video de R2 al disco local listo para extraccion de frames."""
+    """Inicia descarga de video R2 → /data/videos/. Retorna task_id (no bloquea)."""
     if not ctrl.is_configured():
         raise HTTPException(503, "R2 no configurado")
     raw = await request.body()
@@ -135,9 +135,21 @@ async def import_video(request: Request, current_user: dict = Depends(require_ad
     if not remote_key:
         raise HTTPException(400, "remote_key requerido")
     if not match_id:
-        # Auto-deriva el match_id del nombre del archivo
         match_id = os.path.basename(remote_key).replace(".mp4", "").replace(" ", "_").lower()
-    r = ctrl.import_video_to_local(remote_key, match_id)
+    r = ctrl.import_video_async(remote_key, match_id)
     if "error" in r:
         raise HTTPException(r.get("status", 500), r["error"])
     return r
+
+
+# ── Tareas (progreso de upload/download) ──
+
+@router.get("/tasks")
+def list_tasks(current_user: dict = Depends(get_current_user)):
+    """Lista tareas R2 activas o terminadas en los ultimos 5 min."""
+    return ctrl.list_active_tasks()
+
+
+@router.get("/tasks/{task_id}")
+def get_task(task_id: str, current_user: dict = Depends(get_current_user)):
+    return ctrl.get_task(task_id)

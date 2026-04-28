@@ -100,10 +100,20 @@ export default function PipelinePage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      alert(`✅ Video importado: ${data.match_id} (${data.size_mb} MB)`)
-      loadVideos()
-    } catch (e: any) { alert(e.message) }
-    setImportingR2('')
+      // Polling del task para mostrar progreso
+      const taskId = data.task_id
+      const poll = setInterval(async () => {
+        try {
+          const tr = await authFetch(`${API}/storage/tasks/${taskId}`).then(r => r.json())
+          if (!tr.running) {
+            clearInterval(poll)
+            setImportingR2('')
+            if (tr.error) alert(`❌ ${tr.error}`)
+            else loadVideos()
+          }
+        } catch {}
+      }, 1500)
+    } catch (e: any) { alert(e.message); setImportingR2('') }
   }
   const loadVideos = () => authFetch(`${API}/training/videos`).then(r => r.json()).then(list => {
     setVideos(list)

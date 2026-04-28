@@ -1,18 +1,18 @@
 """Storage en Cloudflare R2 (S3-compatible) — modelos, videos, anotados.
 
-Lee credenciales de variables de entorno:
-    R2_ACCESS_KEY_ID       — del token creado en Cloudflare
-    R2_SECRET_ACCESS_KEY   — secret del token
-    R2_ENDPOINT            — https://<account_id>.r2.cloudflarestorage.com
-    R2_BUCKET              — nombre del bucket (ej. sponsorship-mvp)
-
-Si las credenciales no estan presentes, los endpoints retornan error 503.
+Operaciones largas (upload/download de videos) corren en threads en background
+con progress reporting via process_state.r2_tasks. Asi no bloquean el worker.
 """
 import os
 import json
+import time
+import uuid
 import logging
+import threading
 from datetime import datetime
 from typing import Optional
+
+from api.shared.process_state import r2_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -249,3 +249,217 @@ def import_video_to_local(remote_key: str, match_id: str) -> dict:
         "size_mb": size_mb,
         "remote_key": remote_key,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# Tareas asincronas con PROGRESS (upload/download largos)
+# ─────────────────────────────────────────────────────────────
+
+class _ProgressTracker:
+    """Callback para boto3 que actualiza r2_tasks con el progreso."""
+    def __init__(self, task_id: str, total_size: int, action: str):
+        self.task_id = task_id
+        self.total = total_size
+        self.transferred = 0
+        self.action = action  # 'upload' o 'download'
+        self._last_update = 0
+
+    def __call__(self, bytes_amount: int):
+        self.transferred += bytes_amount
+        # Actualizar maximo cada 0.3s para no saturar
+        now = time.time()
+        if now - self._last_update < 0.3 and self.transferred < self.total:
+            return
+        self._last_update = now
+        pct = int((self.transferred / self.total) * 100) if self.total > 0 else 0
+        task = r2_tasks.get(self.task_id, {})
+        task.update({
+            "progress": pct,
+            "transferred_mb": round(self.transferred / (1024 * 1024), 2),
+            "total_mb": round(self.total / (1024 * 1024), 2),
+            "speed_mbps": None,  # lo calcula el endpoint si quiere
+        })
+        r2_tasks[self.task_id] = task
+
+
+def _new_task(action: str, key: str, extra: dict = None) -> str:
+    """Inicializa una tarea nueva y retorna el task_id."""
+    task_id = uuid.uuid4().hex[:12]
+    r2_tasks[task_id] = {
+        "task_id": task_id,
+        "action": action,
+        "key": key,
+        "running": True,
+        "progress": 0,
+        "transferred_mb": 0,
+        "total_mb": 0,
+        "started_at": datetime.now().isoformat(),
+        "finished_at": None,
+        "error": None,
+        **(extra or {}),
+    }
+    return task_id
+
+
+def get_task(task_id: str) -> dict:
+    return r2_tasks.get(task_id, {"error": "task no encontrada"})
+
+
+def list_active_tasks() -> list:
+    """Tareas activas o terminadas en los ultimos 5 min."""
+    now = datetime.now()
+    out = []
+    for tid, t in r2_tasks.items():
+        if t.get("running"):
+            out.append(t)
+        elif t.get("finished_at"):
+            try:
+                done = datetime.fromisoformat(t["finished_at"])
+                if (now - done).total_seconds() < 300:
+                    out.append(t)
+            except Exception:
+                pass
+    return out
+
+
+def upload_file_async(local_path: str, remote_key: str, metadata: dict = None) -> str:
+    """Sube un archivo en BACKGROUND, retorna task_id para polling de progreso."""
+    if not os.path.exists(local_path):
+        raise ValueError(f"Archivo local no existe: {local_path}")
+
+    size = os.path.getsize(local_path)
+    task_id = _new_task("upload", remote_key, {"total_mb": round(size / (1024 * 1024), 2)})
+
+    def worker():
+        try:
+            extra = {}
+            if metadata:
+                extra["Metadata"] = {k: str(v) for k, v in metadata.items()}
+            tracker = _ProgressTracker(task_id, size, "upload")
+            _client().upload_file(
+                local_path, R2_BUCKET, remote_key,
+                ExtraArgs=extra, Callback=tracker,
+            )
+            task = r2_tasks.get(task_id, {})
+            task.update({
+                "running": False,
+                "progress": 100,
+                "transferred_mb": task.get("total_mb", 0),
+                "finished_at": datetime.now().isoformat(),
+                "completed": True,
+            })
+            r2_tasks[task_id] = task
+        except Exception as e:
+            logger.error(f"Upload async fallo: {e}")
+            task = r2_tasks.get(task_id, {})
+            task.update({
+                "running": False,
+                "error": str(e),
+                "finished_at": datetime.now().isoformat(),
+            })
+            r2_tasks[task_id] = task
+
+    threading.Thread(target=worker, daemon=True).start()
+    return task_id
+
+
+def download_file_async(remote_key: str, local_path: str) -> str:
+    """Descarga en BACKGROUND, retorna task_id para polling."""
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    # Obtener tamaño real del objeto en R2
+    try:
+        head = _client().head_object(Bucket=R2_BUCKET, Key=remote_key)
+        size = head["ContentLength"]
+    except Exception as e:
+        raise ValueError(f"Objeto no encontrado en R2: {e}")
+
+    task_id = _new_task("download", remote_key, {
+        "total_mb": round(size / (1024 * 1024), 2),
+        "local_path": local_path,
+    })
+
+    def worker():
+        try:
+            tracker = _ProgressTracker(task_id, size, "download")
+            _client().download_file(R2_BUCKET, remote_key, local_path, Callback=tracker)
+            task = r2_tasks.get(task_id, {})
+            task.update({
+                "running": False,
+                "progress": 100,
+                "transferred_mb": task.get("total_mb", 0),
+                "finished_at": datetime.now().isoformat(),
+                "completed": True,
+            })
+            r2_tasks[task_id] = task
+        except Exception as e:
+            logger.error(f"Download async fallo: {e}")
+            task = r2_tasks.get(task_id, {})
+            task.update({
+                "running": False,
+                "error": str(e),
+                "finished_at": datetime.now().isoformat(),
+            })
+            r2_tasks[task_id] = task
+
+    threading.Thread(target=worker, daemon=True).start()
+    return task_id
+
+
+def import_video_async(remote_key: str, match_id: str) -> dict:
+    """Inicia descarga R2 → /data/videos/ en background. Retorna task_id."""
+    from api.shared.process_state import VIDEOS_DIR
+    if not match_id:
+        return {"error": "match_id requerido", "status": 400}
+    local_path = os.path.join(VIDEOS_DIR, f"{match_id}.mp4")
+    if os.path.exists(local_path):
+        return {"error": f"Ya existe: {match_id}.mp4", "status": 409}
+    try:
+        task_id = download_file_async(remote_key, local_path)
+        return {
+            "task_id": task_id,
+            "match_id": match_id,
+            "remote_key": remote_key,
+            "local_path": local_path,
+        }
+    except Exception as e:
+        return {"error": str(e), "status": 500}
+
+
+def upload_video_async(local_path: str, match_id: str) -> dict:
+    """Inicia upload de video local a R2 en background."""
+    if not os.path.exists(local_path):
+        return {"error": "Video local no existe", "status": 404}
+    key = f"videos/{match_id}.mp4"
+    try:
+        task_id = upload_file_async(local_path, key, {"match_id": match_id})
+        return {"task_id": task_id, "match_id": match_id, "key": key}
+    except Exception as e:
+        return {"error": str(e), "status": 500}
+
+
+def upload_model_async(local_pt_path: str, version: str = None) -> dict:
+    """Sube best.pt en background con metadata de metricas."""
+    if not version:
+        version = datetime.now().strftime("v%Y%m%d_%H%M%S")
+    key = f"models/{version}/best.pt"
+    metadata = {"version": version, "uploaded_at": datetime.now().isoformat()}
+    history_path = local_pt_path.replace("yolo_v1.0/best.pt", "training_history.json")
+    if os.path.exists(history_path):
+        try:
+            with open(history_path) as f:
+                hist = json.load(f)
+            if hist:
+                last = hist[-1]
+                fm = last.get("final_metrics", {})
+                metadata["map50"] = str(fm.get("mAP50", "?"))
+                metadata["precision"] = str(fm.get("precision", "?"))
+                metadata["recall"] = str(fm.get("recall", "?"))
+                metadata["epochs"] = str(last.get("epochs", "?"))
+        except Exception:
+            pass
+    try:
+        task_id = upload_file_async(local_pt_path, key, metadata)
+        return {"task_id": task_id, "version": version, "key": key}
+    except Exception as e:
+        return {"error": str(e), "status": 500}

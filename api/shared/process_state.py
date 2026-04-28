@@ -20,6 +20,9 @@ process_status = {
     "analyze": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
 }
 
+# Tareas R2 (upload/download): { task_id: { running, progress, transferred_mb, total_mb, ... } }
+r2_tasks: dict = {}
+
 
 def now() -> str:
     """Timestamp corto para logs."""

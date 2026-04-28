@@ -21,6 +21,7 @@ export default function StoragePage() {
   const [localVideos, setLocalVideos] = useState<any[]>([])
   const [working, setWorking] = useState<string>('')
   const [versionInput, setVersionInput] = useState('')
+  const [activeTasks, setActiveTasks] = useState<any[]>([])
 
   const reload = () => {
     authFetch(`${API}/storage/status`).then(r => r.json()).then(setStatus).catch(() => {})
@@ -33,6 +34,20 @@ export default function StoragePage() {
 
   useEffect(() => { reload() }, [])
 
+  // Polling de tareas activas (upload/download de R2 con progreso)
+  useEffect(() => {
+    const fetchTasks = () => {
+      authFetch(`${API}/storage/tasks`).then(r => r.ok ? r.json() : []).then(t => {
+        setActiveTasks(t)
+        // Si alguna tarea acaba de terminar, recarga listas
+        if (t.some((x: any) => x.completed && !x.viewed)) reload()
+      }).catch(() => {})
+    }
+    fetchTasks()
+    const id = setInterval(fetchTasks, 1500)
+    return () => clearInterval(id)
+  }, [])
+
   const uploadCurrentModel = async () => {
     const v = versionInput || prompt('Versión (ej. v1.0, v1.1) — vacío = auto:')
     if (v === null) return
@@ -44,9 +59,8 @@ export default function StoragePage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      alert(`✅ Modelo subido: ${data.key} (${data.size_mb} MB)`)
+      // El upload corre en background, el progreso aparece en el panel de tareas
       setVersionInput('')
-      reload()
     } catch (e: any) { alert(e.message) }
     setWorking('')
   }
@@ -81,8 +95,7 @@ export default function StoragePage() {
       const res = await authFetch(`${API}/storage/videos/${matchId}/upload`, { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      alert(`✅ Video subido: ${data.size_mb} MB`)
-      reload()
+      // El progreso aparece en el panel flotante
     } catch (e: any) { alert(e.message) }
     setWorking('')
   }
@@ -167,6 +180,51 @@ R2_BUCKET=sponsorship-mvp`}
           Cloudflare R2 — bucket <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{status.bucket}</code> ✅
         </p>
       </div>
+
+      {/* Panel de tareas activas — siempre visible mientras hay uploads/downloads */}
+      {activeTasks.length > 0 && (
+        <div className="mb-6 bg-white rounded-2xl border-2 border-indigo-200 shadow-sm p-4">
+          <h3 className="text-xs font-bold text-indigo-900 uppercase mb-3 flex items-center gap-2">
+            <span className="w-2 h-2 bg-indigo-500 rounded-full animate-pulse" />
+            Transferencias en curso ({activeTasks.length})
+          </h3>
+          <div className="space-y-2">
+            {activeTasks.map(t => (
+              <div key={t.task_id} className="bg-gray-50 rounded-xl p-3">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-base">{t.action === 'upload' ? '☁⬆' : '⬇📥'}</span>
+                    <code className="text-xs font-mono text-gray-700 truncate">{t.key}</code>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {t.error ? (
+                      <span className="text-xs font-bold text-red-600">❌ {t.error.slice(0, 40)}</span>
+                    ) : t.completed ? (
+                      <span className="text-xs font-bold text-emerald-600">✅ Completado</span>
+                    ) : (
+                      <>
+                        <span className="text-xs font-mono text-gray-500">
+                          {t.transferred_mb}/{t.total_mb} MB
+                        </span>
+                        <span className="text-sm font-bold text-indigo-700">{t.progress}%</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {/* Barra de progreso */}
+                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div className={`h-full transition-all duration-300 ${
+                    t.error ? 'bg-red-500' : t.completed ? 'bg-emerald-500' : 'bg-indigo-500'
+                  }`} style={{ width: `${t.progress || 0}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-400 mt-2 italic">
+            Las transferencias corren en background. Puedes navegar a otras paginas mientras tanto.
+          </p>
+        </div>
+      )}
 
       <div className="flex gap-2 mb-6 border-b border-gray-200">
         {([
