@@ -59,9 +59,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 3
+      retries: 10
+      start_period: 90s   # Da 90s antes de contar fallos (api importa torch+ultralytics)
     networks:
       - sponsorship_net
 
@@ -78,7 +79,7 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started   # No esperar healthy (web no llama API en build)
     networks:
       - sponsorship_net
 
