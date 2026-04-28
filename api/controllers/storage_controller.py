@@ -201,8 +201,29 @@ def upload_annotated_video(local_path: str, match_id: str) -> dict:
 
 
 def list_videos() -> list:
-    return list_objects(prefix="videos/")
+    """Lista TODOS los videos (.mp4) del bucket, excepto los anotados.
+
+    Asi reconoce videos que esten en cualquier path del bucket, no solo /videos/.
+    """
+    all_objs = list_objects(prefix="")
+    return [
+        o for o in all_objs
+        if o["key"].lower().endswith(".mp4")
+        and not o["key"].startswith("annotated/")
+        and "_annotated.mp4" not in o["key"]
+    ]
 
 
 def list_annotated() -> list:
-    return list_objects(prefix="annotated/")
+    """Lista videos anotados (con bbox dibujados)."""
+    all_objs = list_objects(prefix="")
+    return [
+        o for o in all_objs
+        if o["key"].lower().endswith(".mp4")
+        and (o["key"].startswith("annotated/") or "_annotated.mp4" in o["key"])
+    ]
+
+
+def list_all_objects() -> list:
+    """Lista TODO lo que hay en el bucket — explorador generico."""
+    return list_objects(prefix="")

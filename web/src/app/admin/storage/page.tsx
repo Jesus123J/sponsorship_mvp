@@ -12,11 +12,12 @@ function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
 }
 
 export default function StoragePage() {
-  const [tab, setTab] = useState<'models' | 'videos' | 'annotated'>('models')
+  const [tab, setTab] = useState<'models' | 'videos' | 'annotated' | 'browse'>('browse')
   const [status, setStatus] = useState<any>(null)
   const [models, setModels] = useState<any[]>([])
   const [videos, setVideos] = useState<any[]>([])
   const [annotated, setAnnotated] = useState<any[]>([])
+  const [allObjects, setAllObjects] = useState<any[]>([])
   const [localVideos, setLocalVideos] = useState<any[]>([])
   const [working, setWorking] = useState<string>('')
   const [versionInput, setVersionInput] = useState('')
@@ -26,6 +27,7 @@ export default function StoragePage() {
     authFetch(`${API}/storage/models`).then(r => r.ok ? r.json() : []).then(setModels).catch(() => {})
     authFetch(`${API}/storage/videos`).then(r => r.ok ? r.json() : []).then(setVideos).catch(() => {})
     authFetch(`${API}/storage/annotated`).then(r => r.ok ? r.json() : []).then(setAnnotated).catch(() => {})
+    authFetch(`${API}/storage/browse`).then(r => r.ok ? r.json() : []).then(setAllObjects).catch(() => {})
     authFetch(`${API}/training/videos`).then(r => r.json()).then(setLocalVideos).catch(() => {})
   }
 
@@ -168,9 +170,10 @@ R2_BUCKET=sponsorship-mvp`}
 
       <div className="flex gap-2 mb-6 border-b border-gray-200">
         {([
+          { k: 'browse', label: '🗂 Todo el bucket', count: allObjects.length },
           { k: 'models', label: '🧠 Modelos', count: models.length },
-          { k: 'videos', label: '🎬 Videos originales', count: videos.length },
-          { k: 'annotated', label: '🎯 Videos anotados', count: annotated.length },
+          { k: 'videos', label: '🎬 Videos', count: videos.length },
+          { k: 'annotated', label: '🎯 Anotados', count: annotated.length },
         ] as const).map(t => (
           <button key={t.k} onClick={() => setTab(t.k)}
             className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
@@ -181,6 +184,63 @@ R2_BUCKET=sponsorship-mvp`}
           </button>
         ))}
       </div>
+
+      {/* BROWSE — todo el bucket */}
+      {tab === 'browse' && (
+        <div>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4">
+            <p className="text-sm font-semibold text-slate-900">🗂 Vista completa del bucket</p>
+            <p className="text-xs text-slate-600 mt-1">
+              Lista TODO lo que hay en R2, sin importar la carpeta. Útil si subiste videos con paths personalizados.
+            </p>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Archivo / Path</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Tamaño</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Subido</th>
+                  <th className="text-center px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Acción</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allObjects.length === 0 && (
+                  <tr><td colSpan={4} className="text-center text-gray-400 py-8">El bucket está vacío.</td></tr>
+                )}
+                {allObjects.map((obj) => {
+                  const isVideo = obj.key.toLowerCase().endsWith('.mp4')
+                  const isModel = obj.key.endsWith('.pt')
+                  const icon = isVideo ? '🎬' : isModel ? '🧠' : '📄'
+                  return (
+                    <tr key={obj.key} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="px-4 py-3">
+                        <span className="mr-2">{icon}</span>
+                        <code className="text-xs">{obj.key}</code>
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono">{fmt(obj.size_mb)}</td>
+                      <td className="px-4 py-3 text-gray-500">{ago(obj.last_modified)}</td>
+                      <td className="px-4 py-3 text-center">
+                        <button onClick={() => getDownloadUrl(obj.key)}
+                          className="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-xs font-medium hover:bg-indigo-200">
+                          🔗 URL
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {allObjects.length > 0 && (
+            <p className="text-xs text-gray-500 mt-3 text-center">
+              Total: {allObjects.length} objetos · {fmt(allObjects.reduce((a, b) => a + b.size_mb, 0))}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* MODELS */}
       {tab === 'models' && (

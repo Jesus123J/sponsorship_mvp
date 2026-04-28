@@ -113,3 +113,11 @@ def get_presigned_url(key: str, expires: int = 3600,
     if not url:
         raise HTTPException(500, "No se pudo generar URL")
     return {"url": url, "expires_in": expires}
+
+
+@router.get("/browse")
+def browse_all(current_user: dict = Depends(require_admin)):
+    """Lista TODOS los objetos del bucket (explorador generico)."""
+    if not ctrl.is_configured():
+        raise HTTPException(503, "R2 no configurado")
+    return ctrl.list_all_objects()
