@@ -18,6 +18,8 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    env_file:
+      - .env   # carga R2_*, etc. (si existe)
     environment:
       ENV: development            # ← desarrollo local
       DB_HOST: ${DB_HOST:-host.docker.internal}
