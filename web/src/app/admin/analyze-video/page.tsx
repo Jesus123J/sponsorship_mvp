@@ -1,6 +1,10 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import { getToken } from '@/lib/auth'
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, Legend,
+} from 'recharts'
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'
 
@@ -34,7 +38,6 @@ export default function AnalyzeVideoPage() {
   const [detections, setDetections] = useState<any>(null)
   const [filterSponsor, setFilterSponsor] = useState('')
   const [filterSource, setFilterSource] = useState<'all' | 'jugador' | 'estadio' | 'tribuna_staff'>('all')
-  const [filterSurface, setFilterSurface] = useState<'all' | 'overlay_digital' | 'fisico'>('all')
   const [filterEntity, setFilterEntity] = useState<string>('all')
   const [jumpToTime, setJumpToTime] = useState<number | null>(null)
   // Catalogo + partido info
@@ -202,11 +205,11 @@ export default function AnalyzeVideoPage() {
   const downloadDetectionsCsv = () => {
     if (!detections?.detections) return
     const rows = [
-      ['frame', 'timestamp_seg', 'timestamp', 'sponsor', 'source', 'surface_type', 'is_overlay', 'entity_id', 'player_overlap', 'color_distance', 'confidence', 'x1', 'y1', 'x2', 'y2', 'width', 'height', 'persons_in_frame'],
+      ['frame', 'timestamp_seg', 'timestamp', 'sponsor', 'source', 'entity_id', 'player_overlap', 'pitch_ratio', 'color_distance', 'confidence', 'x1', 'y1', 'x2', 'y2', 'width', 'height', 'persons_in_frame'],
       ...detections.detections.map((d: any) => [
         d.frame, d.timestamp, d.timestamp_str, d.sponsor,
-        d.source || 'estadio', d.surface_type || 'fisico_estadio', d.is_overlay ? 1 : 0,
-        d.entity_id || '', d.player_overlap || 0, d.color_distance || '',
+        d.source || 'estadio',
+        d.entity_id || '', d.player_overlap || 0, d.pitch_ratio || 0, d.color_distance || '',
         d.confidence,
         d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3], d.width, d.height,
         d.persons_in_frame || 0,
@@ -257,12 +260,12 @@ export default function AnalyzeVideoPage() {
         if (ctx) {
           ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
           const [x1, y1, x2, y2] = det.bbox
-          const boxColor = det.is_overlay ? '#a855f7' : det.on_player ? '#fbbf24' : '#3b82f6'
+          const boxColor = det.on_player ? '#fbbf24' : det.source === 'tribuna_staff' ? '#9ca3af' : '#3b82f6'
           ctx.lineWidth = Math.max(3, canvas.width / 400)
           ctx.strokeStyle = boxColor
           ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
           ctx.font = `bold ${Math.max(16, canvas.width / 50)}px sans-serif`
-          const icon = det.is_overlay ? '[*]' : det.on_player ? '[J]' : '[V]'
+          const icon = det.on_player ? '[J]' : det.source === 'tribuna_staff' ? '[T]' : '[V]'
           const label = `${icon} ${det.sponsor} ${(det.confidence * 100).toFixed(0)}%`
           const tw = ctx.measureText(label).width
           const th = Math.max(20, canvas.width / 45)
@@ -305,8 +308,6 @@ export default function AnalyzeVideoPage() {
   const filteredDets = detections?.detections?.filter((d: any) => {
     if (filterSponsor && !d.sponsor.toLowerCase().includes(filterSponsor.toLowerCase())) return false
     if (filterSource !== 'all' && d.source !== filterSource) return false
-    if (filterSurface === 'overlay_digital' && !d.is_overlay) return false
-    if (filterSurface === 'fisico' && d.is_overlay) return false
     if (filterEntity !== 'all' && (d.entity_id || 'sin_equipo') !== filterEntity) return false
     return true
   }) || []
@@ -563,59 +564,11 @@ export default function AnalyzeVideoPage() {
             </p>
           </div>
 
-          {/* Superficie: fisico vs overlay digital */}
-          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
-            <h2 className="text-sm font-semibold text-gray-900 mb-4">
-              5. Superficie: fisico (estadio real) vs overlay digital (computadora)
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-              <button onClick={() => setFilterSurface(filterSurface === 'fisico' ? 'all' : 'fisico')}
-                className={`rounded-xl p-4 text-left border-2 transition-all ${
-                  filterSurface === 'fisico' ? 'border-emerald-500 bg-emerald-50' : 'border-gray-100 hover:border-emerald-300'
-                }`}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xl">🏟</span>
-                  <p className="text-sm font-semibold text-gray-900">Fisico en estadio</p>
-                </div>
-                <p className="text-2xl font-bold text-emerald-700">
-                  {(detections.by_surface?.fisico_camiseta || 0) + (detections.by_surface?.fisico_estadio || 0)}
-                </p>
-                <p className="text-[11px] text-gray-500">Camiseta, valla LED, banner, etc.</p>
-              </button>
-              <button onClick={() => setFilterSurface(filterSurface === 'overlay_digital' ? 'all' : 'overlay_digital')}
-                className={`rounded-xl p-4 text-left border-2 transition-all ${
-                  filterSurface === 'overlay_digital' ? 'border-purple-500 bg-purple-50' : 'border-gray-100 hover:border-purple-300'
-                }`}>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xl">💻</span>
-                  <p className="text-sm font-semibold text-gray-900">Overlay digital</p>
-                </div>
-                <p className="text-2xl font-bold text-purple-700">{detections.by_surface?.overlay_digital || 0}</p>
-                <p className="text-[11px] text-gray-500">Gráfico artificial del canal (TV)</p>
-              </button>
-              <div className="rounded-xl p-4 bg-gray-50 border-2 border-gray-100">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xl">👕</span>
-                  <p className="text-sm font-semibold text-gray-900">Subdivision fisica</p>
-                </div>
-                <p className="text-[11px] text-gray-600 mt-1">
-                  Camiseta: <strong>{detections.by_surface?.fisico_camiseta || 0}</strong>
-                </p>
-                <p className="text-[11px] text-gray-600">
-                  Estadio: <strong>{detections.by_surface?.fisico_estadio || 0}</strong>
-                </p>
-              </div>
-            </div>
-            <p className="text-[11px] text-gray-500 italic">
-              Un overlay se detecta cuando el mismo sponsor aparece en la MISMA posicion por varios frames, con bordes muy nitidos y colores saturados (senales de grafico generado por computadora, no fisico del estadio).
-            </p>
-          </div>
-
           {/* Atribucion por equipo */}
           {detections.by_entity && Object.keys(detections.by_entity).length > 0 && (
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
               <h2 className="text-sm font-semibold text-gray-900 mb-4">
-                6. Detecciones por equipo (atribucion por color de camiseta)
+                5. Detecciones por equipo (atribucion por color de camiseta)
               </h2>
               {detections.teams_available?.length === 0 && (
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
@@ -648,31 +601,137 @@ export default function AnalyzeVideoPage() {
             </div>
           )}
 
+          {/* GRAFICOS — visualizacion rapida */}
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-4">
+              📊 Visualizacion estadistica
+            </h2>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Bar chart: top sponsors por detecciones */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-700 mb-2">Top 10 Sponsors por detecciones</h3>
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={(() => {
+                    return Object.entries(detections.sponsors_summary || {})
+                      .sort((a: any, b: any) => b[1] - a[1])
+                      .slice(0, 10)
+                      .map(([name, count]: any) => ({ name, count, color: colorFor(name) }))
+                  })()} layout="vertical" margin={{ left: 80 }}>
+                    <XAxis type="number" tick={{ fontSize: 11 }} />
+                    <YAxis dataKey="name" type="category" tick={{ fontSize: 10 }} width={75} />
+                    <Tooltip />
+                    <Bar dataKey="count" radius={[0, 6, 6, 0]}>
+                      {Object.entries(detections.sponsors_summary || {})
+                        .sort((a: any, b: any) => b[1] - a[1])
+                        .slice(0, 10)
+                        .map(([name]: any, i: number) => (
+                          <Cell key={i} fill={colorFor(name)} />
+                        ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Pie chart: distribucion por fuente */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-700 mb-2">Distribucion por fuente</h3>
+                <ResponsiveContainer width="100%" height={280}>
+                  <PieChart>
+                    <Pie
+                      data={[
+                        { name: '👕 Jugador en cancha', value: detections.by_source?.jugador || 0, color: '#f59e0b' },
+                        { name: '🏟 Estadio / valla', value: detections.by_source?.estadio || 0, color: '#3b82f6' },
+                        { name: '👥 Tribuna / staff', value: detections.by_source?.tribuna_staff || 0, color: '#9ca3af' },
+                      ].filter(d => d.value > 0)}
+                      dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90}
+                      label={(e: any) => `${e.value}`}
+                    >
+                      {[
+                        { color: '#f59e0b' }, { color: '#3b82f6' }, { color: '#9ca3af' },
+                      ].map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <Tooltip />
+                    <Legend wrapperStyle={{ fontSize: '11px' }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Pie chart: distribucion por equipo (donut) */}
+              {detections.by_entity && Object.keys(detections.by_entity).length > 0 && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-700 mb-2">Distribucion por equipo / liga</h3>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <PieChart>
+                      <Pie
+                        data={Object.entries(detections.by_entity || {})
+                          .filter(([_, v]: any) => v > 0)
+                          .map(([name, value]: any) => ({
+                            name: name === 'liga_1' ? 'Liga 1' : name === 'sin_equipo' ? 'Sin atribuir' : name,
+                            value,
+                          }))}
+                        dataKey="value" nameKey="name" cx="50%" cy="50%"
+                        innerRadius={50} outerRadius={90}
+                        label={(e: any) => `${e.value}`}
+                      >
+                        {Object.entries(detections.by_entity || {}).filter(([_, v]: any) => v > 0).map(([name]: any, i: number) => {
+                          const c = name === 'liga_1' ? '#3b82f6' : name === 'sin_equipo' ? '#9ca3af' : ['#f97316', '#10b981', '#a855f7'][i % 3]
+                          return <Cell key={i} fill={c} />
+                        })}
+                      </Pie>
+                      <Tooltip />
+                      <Legend wrapperStyle={{ fontSize: '11px' }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              {/* Bar chart: timeline de detecciones por minuto */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-700 mb-2">Detecciones por minuto del clip</h3>
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={(() => {
+                    const buckets: Record<number, number> = {}
+                    for (const d of detections.detections || []) {
+                      const minute = Math.floor(d.timestamp / 60)
+                      buckets[minute] = (buckets[minute] || 0) + 1
+                    }
+                    return Object.entries(buckets)
+                      .map(([min, count]) => ({ minute: `${min}m`, count }))
+                      .sort((a, b) => parseInt(a.minute) - parseInt(b.minute))
+                  })()}>
+                    <XAxis dataKey="minute" tick={{ fontSize: 11 }} />
+                    <YAxis tick={{ fontSize: 11 }} />
+                    <Tooltip />
+                    <Bar dataKey="count" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
           {/* MATRIZ SPONSOR × (EQUIPO / ESTADIO / OVERLAY) */}
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
             <h2 className="text-sm font-semibold text-gray-900 mb-1">
-              7. Matriz — ¿Qué marca aparece donde?
+              6. Matriz — ¿Qué marca aparece donde?
             </h2>
             <p className="text-xs text-gray-500 mb-4">
-              Vista cruzada: cada sponsor × cada equipo / estadio / overlay. Ideal para responder &quot;¿qué sponsors aparecen en camiseta de Alianza?&quot;.
+              Vista cruzada: cada sponsor × cada equipo / estadio. Ideal para responder &quot;¿qué sponsors aparecen en camiseta de Alianza?&quot;.
             </p>
             {(() => {
               const dets = detections.detections || []
               const sponsors = Object.keys(detections.sponsors_summary || {}).sort()
 
-              // Columnas: cada equipo real + 🏟 estadio + 💻 overlay
+              // Columnas: cada equipo real + 🏟 estadio
               const realTeams = Object.keys(detections.by_entity || {})
                 .filter(e => e !== 'liga_1' && e !== 'sin_equipo')
                 .sort()
 
-              // Construir matriz: sponsor → { jugador_<team>: n, estadio: n, overlay: n }
+              // Construir matriz: sponsor → { jugador_<team>: n, estadio: n }
               const matrix: Record<string, Record<string, number>> = {}
               for (const sp of sponsors) matrix[sp] = {}
               for (const d of dets) {
                 const row = matrix[d.sponsor] || (matrix[d.sponsor] = {})
-                if (d.is_overlay) {
-                  row['overlay'] = (row['overlay'] || 0) + 1
-                } else if (d.source === 'jugador' && d.entity_id) {
+                if (d.source === 'jugador' && d.entity_id) {
                   const key = `jugador_${d.entity_id}`
                   row[key] = (row[key] || 0) + 1
                 } else {
@@ -704,12 +763,6 @@ export default function AnalyzeVideoPage() {
                             <span className="text-[10px] text-gray-500">vallas/banners</span>
                           </div>
                         </th>
-                        <th className="text-center px-3 py-2 font-semibold text-purple-700 border-b border-gray-200">
-                          <div className="flex flex-col items-center">
-                            <span>💻 Overlay</span>
-                            <span className="text-[10px] text-gray-500">digital / TV</span>
-                          </div>
-                        </th>
                         <th className="text-center px-3 py-2 font-semibold text-gray-900 border-b border-gray-200 bg-gray-100">
                           Total
                         </th>
@@ -738,15 +791,12 @@ export default function AnalyzeVideoPage() {
                             <td className={`px-3 py-2 text-center ${(row['estadio'] || 0) > 0 ? 'bg-blue-50 font-bold text-blue-900' : 'text-gray-300'}`}>
                               {row['estadio'] || '—'}
                             </td>
-                            <td className={`px-3 py-2 text-center ${(row['overlay'] || 0) > 0 ? 'bg-purple-50 font-bold text-purple-900' : 'text-gray-300'}`}>
-                              {row['overlay'] || '—'}
-                            </td>
                             <td className="px-3 py-2 text-center font-bold bg-gray-50">{total}</td>
                           </tr>
                         )
                       })}
                       {sponsors.length === 0 && (
-                        <tr><td colSpan={realTeams.length + 4} className="text-center text-gray-400 py-8">Sin detecciones</td></tr>
+                        <tr><td colSpan={realTeams.length + 3} className="text-center text-gray-400 py-8">Sin detecciones</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -759,7 +809,7 @@ export default function AnalyzeVideoPage() {
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-semibold text-gray-900">
-                8. Resumen por sponsor
+                7. Resumen por sponsor
               </h2>
               <div className="flex gap-2">
                 <button onClick={downloadDetectionsCsv}
@@ -799,7 +849,7 @@ export default function AnalyzeVideoPage() {
           {/* Tabla detallada de detecciones */}
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-gray-900">9. Detecciones frame a frame</h2>
+              <h2 className="text-sm font-semibold text-gray-900">8. Detecciones frame a frame</h2>
               <div className="flex items-center gap-2">
                 <select value={filterSource} onChange={e => setFilterSource(e.target.value as any)}
                   className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs bg-white">
@@ -811,8 +861,8 @@ export default function AnalyzeVideoPage() {
                 <input type="text" value={filterSponsor} onChange={e => setFilterSponsor(e.target.value)}
                   placeholder="Filtrar por sponsor..."
                   className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs" />
-                {(filterSponsor || filterSource !== 'all' || filterSurface !== 'all' || filterEntity !== 'all') && (
-                  <button onClick={() => { setFilterSponsor(''); setFilterSource('all'); setFilterSurface('all'); setFilterEntity('all') }}
+                {(filterSponsor || filterSource !== 'all' || filterEntity !== 'all') && (
+                  <button onClick={() => { setFilterSponsor(''); setFilterSource('all'); setFilterEntity('all') }}
                     className="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-700">Limpiar todos</button>
                 )}
               </div>
@@ -826,7 +876,6 @@ export default function AnalyzeVideoPage() {
                     <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Tiempo</th>
                     <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Sponsor</th>
                     <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Fuente</th>
-                    <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Superficie</th>
                     <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Equipo</th>
                     <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Conf.</th>
                     <th className="px-2 py-2 font-semibold text-gray-500 uppercase">Tamano</th>
@@ -860,21 +909,6 @@ export default function AnalyzeVideoPage() {
                         )}
                       </td>
                       <td className="px-2 py-1.5">
-                        {d.is_overlay ? (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-purple-100 text-purple-800 rounded text-[10px] font-bold" title={`Estable por ${d.overlay_stable_frames} frames`}>
-                            💻 Overlay
-                          </span>
-                        ) : d.surface_type === 'fisico_camiseta' ? (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">
-                            👕 Camiseta
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-slate-100 text-slate-700 rounded text-[10px] font-bold">
-                            🏟 Estadio
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-2 py-1.5">
                         {d.entity_id ? (
                           <code className={`text-[10px] font-bold ${
                             d.entity_id === 'liga_1' ? 'text-blue-700' : 'text-orange-700'
@@ -900,7 +934,7 @@ export default function AnalyzeVideoPage() {
                     </tr>
                   ))}
                   {filteredDets.length === 0 && (
-                    <tr><td colSpan={9} className="text-center py-8 text-gray-400">Sin resultados</td></tr>
+                    <tr><td colSpan={8} className="text-center py-8 text-gray-400">Sin resultados</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1019,25 +1053,6 @@ export default function AnalyzeVideoPage() {
                     )}
                   </DataRow>
                 )}
-
-                <DataRow label="Superficie">
-                  {viewingDet.is_overlay ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-800 rounded text-xs font-bold">
-                      💻 Overlay digital
-                      {viewingDet.overlay_stable_frames > 0 && (
-                        <span className="text-purple-600 font-normal">({viewingDet.overlay_stable_frames} frames estable)</span>
-                      )}
-                    </span>
-                  ) : viewingDet.surface_type === 'fisico_camiseta' ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded text-xs font-bold">
-                      👕 Fisico en camiseta
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-700 rounded text-xs font-bold">
-                      🏟 Fisico en estadio
-                    </span>
-                  )}
-                </DataRow>
 
                 <DataRow label="Equipo atribuido">
                   {viewingDet.entity_id ? (

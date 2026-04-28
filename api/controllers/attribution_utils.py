@@ -47,66 +47,128 @@ def hsv_distance(hsv1: tuple[int, int, int], hsv2: tuple[int, int, int]) -> floa
     return math.sqrt((dh * 1.5) ** 2 + ds ** 2 + (dv * 0.3) ** 2)
 
 
-def dominant_color_around_logo(frame, logo_bbox, expand_factor=1.2):
-    """Toma la franja de camiseta alrededor del bbox del logo (arriba y abajo, evitando el logo mismo)
-    y devuelve el color HSV dominante por histograma de hue."""
+def _filter_pixels_kmeans(hsv_pixels, k: int = 3):
+    """Encuentra los K colores dominantes via K-Means.
+
+    Retorna lista [(hsv_center, weight)...] ordenada por peso (mayor a menor).
+    """
+    if not HAS_CV or len(hsv_pixels) < k:
+        return []
+
+    pixels_f32 = hsv_pixels.astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, centers = cv2.kmeans(pixels_f32, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+    labels = labels.flatten()
+    counts = np.bincount(labels, minlength=k)
+    total = counts.sum()
+    result = []
+    for i in range(k):
+        result.append((tuple(int(v) for v in centers[i]), counts[i] / total if total > 0 else 0))
+    result.sort(key=lambda x: -x[1])
+    return result
+
+
+def dominant_colors_around_logo(frame, logo_bbox):
+    """Sample area of jersey around logo, filter skin/grass/extremes,
+    and run K-Means para encontrar 3 colores dominantes con su peso.
+
+    Retorna lista [(hsv, weight), ...] ordenada por dominancia.
+    """
     if not HAS_CV:
-        return None
+        return []
+
     x1, y1, x2, y2 = [int(v) for v in logo_bbox]
     h, w = frame.shape[:2]
     bw, bh = x2 - x1, y2 - y1
+    if bw <= 0 or bh <= 0:
+        return []
 
-    # franja arriba y abajo del logo, del mismo ancho
-    top_y1 = max(0, int(y1 - bh * expand_factor))
-    top_y2 = y1
-    bot_y1 = y2
-    bot_y2 = min(h, int(y2 + bh * expand_factor))
-    sx1 = max(0, int(x1 - bw * 0.1))
-    sx2 = min(w, int(x2 + bw * 0.1))
+    # Sampling: rectangulo expandido alrededor del logo
+    pad_x = int(bw * 0.4)
+    pad_y = int(bh * 0.6)
+    sx1 = max(0, x1 - pad_x)
+    sx2 = min(w, x2 + pad_x)
+    sy1 = max(0, y1 - pad_y)
+    sy2 = min(h, y2 + pad_y)
 
-    strips = []
-    if top_y2 > top_y1:
-        strips.append(frame[top_y1:top_y2, sx1:sx2])
-    if bot_y2 > bot_y1:
-        strips.append(frame[bot_y1:bot_y2, sx1:sx2])
-    if not strips:
-        return None
+    region = frame[sy1:sy2, sx1:sx2]
+    if region.size == 0:
+        return []
 
-    combined = np.concatenate([s.reshape(-1, 3) for s in strips], axis=0)
-    if combined.size == 0:
-        return None
+    # Enmascarar el logo mismo (no queremos sus colores)
+    mask = np.ones(region.shape[:2], dtype=bool)
+    iy1 = max(0, y1 - sy1)
+    iy2 = min(region.shape[0], y2 - sy1)
+    ix1 = max(0, x1 - sx1)
+    ix2 = min(region.shape[1], x2 - sx1)
+    mask[iy1:iy2, ix1:ix2] = False
 
-    hsv = cv2.cvtColor(combined.reshape(1, -1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
-    # Filtrar pixeles muy oscuros (sombras) y muy claros (luces/cesped blanco)
-    valid = hsv[(hsv[:, 2] > 40) & (hsv[:, 2] < 240) & (hsv[:, 1] > 30)]
-    if len(valid) < 20:
-        valid = hsv  # fallback
+    pixels_bgr = region[mask].reshape(-1, 3)
+    if len(pixels_bgr) < 100:
+        return []
 
-    # Color dominante por moda del hue (mas robusto que media)
-    h_mode = int(np.median(valid[:, 0]))
-    s_mode = int(np.median(valid[:, 1]))
-    v_mode = int(np.median(valid[:, 2]))
-    return (h_mode, s_mode, v_mode)
+    hsv = cv2.cvtColor(pixels_bgr.reshape(1, -1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
+    h_arr, s_arr, v_arr = hsv[:, 0], hsv[:, 1], hsv[:, 2]
+
+    # Filtros — excluir lo que NO es camiseta:
+    # 1. Piel (tonos cara/manos): H 0-25, S 30-150, V 80-220
+    is_skin = (h_arr <= 25) & (s_arr >= 30) & (s_arr <= 160) & (v_arr >= 80) & (v_arr <= 220)
+    # 2. Cesped: H 30-90, S>=50 (verde de cancha)
+    is_grass = (h_arr >= 30) & (h_arr <= 90) & (s_arr >= 50)
+    # 3. Negro/sombras (V muy bajo)
+    is_black = v_arr < 35
+    # 4. Blanco extremo (V casi 255 + saturacion casi 0)
+    is_extreme_white = (v_arr >= 240) & (s_arr <= 15)
+
+    valid_mask = ~(is_skin | is_grass | is_black | is_extreme_white)
+    valid_pixels = hsv[valid_mask]
+
+    if len(valid_pixels) < 50:
+        # Fallback: usar todo si filtramos demasiado
+        valid_pixels = hsv
+
+    return _filter_pixels_kmeans(valid_pixels, k=3)
 
 
-def classify_team_by_color(frame, logo_bbox, team_colors: dict) -> tuple[str | None, float]:
-    """Devuelve (entity_id, distancia) del equipo mas cercano por color.
+def classify_team_by_color(frame, logo_bbox, team_colors: dict, team_secondary_colors: dict | None = None) -> tuple[str | None, float]:
+    """Atribuye al equipo mas cercano usando los 2-3 colores dominantes vs primario+secundario.
 
-    team_colors = { 'alianza_lima': (H,S,V), 'universitario': (H,S,V), ... }
+    team_colors = { 'alianza_lima': (H,S,V), ... }                  primarios
+    team_secondary_colors = { 'alianza_lima': (H,S,V), ... }        secundarios (opcional)
     """
-    dominant = dominant_color_around_logo(frame, logo_bbox)
-    if dominant is None or not team_colors:
+    dominants = dominant_colors_around_logo(frame, logo_bbox)
+    if not dominants or not team_colors:
         return (None, float('inf'))
 
-    best_id, best_dist = None, float('inf')
-    for eid, tc in team_colors.items():
-        if tc is None:
+    team_secondary_colors = team_secondary_colors or {}
+
+    # Para cada equipo: distancia minima entre cualquiera de sus colores
+    # (primario o secundario) y cualquiera de los 2 colores dominantes top.
+    # Pesa la distancia por la dominancia del color sampleado.
+    best_id, best_score = None, float('inf')
+    top_dominants = dominants[:2]  # solo los 2 mas dominantes
+
+    for eid, primary in team_colors.items():
+        if primary is None:
             continue
-        d = hsv_distance(dominant, tc)
-        if d < best_dist:
-            best_dist = d
+        secondary = team_secondary_colors.get(eid)
+        team_palette = [primary] + ([secondary] if secondary else [])
+
+        # Score del equipo = mejor (menor) match entre sus colores y los dominantes
+        team_min_dist = float('inf')
+        for tc in team_palette:
+            for dom_hsv, weight in top_dominants:
+                d = hsv_distance(dom_hsv, tc)
+                # Penalizar menos los matches del color mas dominante
+                weighted = d * (1.5 - weight)  # weight 0-1, factor 0.5-1.5
+                if weighted < team_min_dist:
+                    team_min_dist = weighted
+
+        if team_min_dist < best_score:
+            best_score = team_min_dist
             best_id = eid
-    return (best_id, best_dist)
+
+    return (best_id, best_score)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -159,104 +221,3 @@ def is_on_pitch(frame, person_bbox, min_green_ratio: float = 0.20) -> tuple[bool
     return (ratio >= min_green_ratio, round(ratio, 3))
 
 
-# ──────────────────────────────────────────────────────────────
-# Deteccion overlay digital vs fisico
-# ──────────────────────────────────────────────────────────────
-
-class OverlayDetector:
-    """Track posicion de cada sponsor entre frames. Si un sponsor aparece en la
-    MISMA posicion por N frames seguidos → probable overlay digital.
-
-    Combinado con saturacion y nitidez de bordes para mayor precision.
-    """
-
-    def __init__(self, position_tolerance_px=15, min_stable_frames=3):
-        self.position_tolerance = position_tolerance_px
-        self.min_stable_frames = min_stable_frames
-        # { sponsor: [(frame_idx, bbox), ...] }
-        self.history: dict = defaultdict(list)
-        self.max_history = 30
-
-    def _bbox_center(self, bbox):
-        x1, y1, x2, y2 = bbox
-        return ((x1 + x2) / 2, (y1 + y2) / 2)
-
-    def _same_position(self, bbox_a, bbox_b):
-        ca = self._bbox_center(bbox_a)
-        cb = self._bbox_center(bbox_b)
-        return math.hypot(ca[0] - cb[0], ca[1] - cb[1]) < self.position_tolerance
-
-    def _size_similar(self, bbox_a, bbox_b, tol=0.1):
-        wa, ha = bbox_a[2] - bbox_a[0], bbox_a[3] - bbox_a[1]
-        wb, hb = bbox_b[2] - bbox_b[0], bbox_b[3] - bbox_b[1]
-        if wa == 0 or ha == 0:
-            return False
-        return abs(wa - wb) / wa < tol and abs(ha - hb) / ha < tol
-
-    def classify(self, frame, sponsor: str, frame_idx: int, bbox, on_player: bool):
-        """Clasifica la deteccion. Retorna dict con surface_type, is_overlay, signals."""
-        # Si esta sobre jugador NO puede ser overlay (los jugadores se mueven)
-        if on_player:
-            self._add_to_history(sponsor, frame_idx, bbox)
-            return {
-                "surface_type": "fisico_camiseta",
-                "is_overlay": False,
-                "stable_frames": 0,
-                "signals": {"on_player": True},
-            }
-
-        # Señal 1: estabilidad de posicion entre frames
-        recent = self.history[sponsor][-self.max_history:]
-        stable_count = 0
-        for _, prev_bbox in reversed(recent):
-            if self._same_position(bbox, prev_bbox) and self._size_similar(bbox, prev_bbox):
-                stable_count += 1
-            else:
-                break
-
-        # Señal 2: saturacion alta (overlays tienen colores puros)
-        saturation = None
-        sharpness = None
-        if HAS_CV:
-            x1, y1, x2, y2 = [max(0, int(v)) for v in bbox]
-            if x2 > x1 and y2 > y1:
-                patch = frame[y1:y2, x1:x2]
-                if patch.size > 0:
-                    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-                    saturation = float(hsv[:, :, 1].mean())
-                    # Señal 3: nitidez (overlays tienen bordes perfectos)
-                    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-                    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-        # Decision: combinacion ponderada
-        is_overlay = False
-        score = 0
-        if stable_count >= self.min_stable_frames:
-            score += 3  # la señal mas fuerte
-        if saturation is not None and saturation > 170:
-            score += 1
-        if sharpness is not None and sharpness > 600:
-            score += 1
-
-        is_overlay = score >= 3  # necesita estabilidad + al menos algo mas
-
-        surface_type = "overlay_digital" if is_overlay else "fisico_estadio"
-
-        self._add_to_history(sponsor, frame_idx, bbox)
-
-        return {
-            "surface_type": surface_type,
-            "is_overlay": is_overlay,
-            "stable_frames": stable_count,
-            "signals": {
-                "stable_frames": stable_count,
-                "saturation": round(saturation, 1) if saturation is not None else None,
-                "sharpness": round(sharpness, 1) if sharpness is not None else None,
-                "score": score,
-            },
-        }
-
-    def _add_to_history(self, sponsor: str, frame_idx: int, bbox):
-        self.history[sponsor].append((frame_idx, bbox))
-        if len(self.history[sponsor]) > self.max_history:
-            self.history[sponsor].pop(0)

@@ -7,26 +7,30 @@ import shutil
 from api.shared.process_state import DATA_DIR, VIDEOS_DIR, process_status, now
 from api.database import fetch_one
 from api.controllers.attribution_utils import (
-    OverlayDetector, classify_team_by_color, parse_hsv_from_db, is_on_pitch,
+    classify_team_by_color, parse_hsv_from_db, is_on_pitch,
 )
 
 
-def _load_team_colors(match_id: str) -> dict:
+def _load_team_colors(match_id: str) -> tuple[dict, dict]:
     partido = fetch_one(
         "SELECT equipo_local, equipo_visitante FROM partidos WHERE match_id = %s",
         (match_id,),
     )
-    teams = {}
+    primary, secondary = {}, {}
     if not partido:
-        return teams
+        return primary, secondary
     for team_id in (partido.get("equipo_local"), partido.get("equipo_visitante")):
         if team_id and team_id != "desconocido":
             row = fetch_one(
-                "SELECT color_primario_hsv FROM entidades WHERE entity_id = %s", (team_id,),
+                "SELECT color_primario_hsv, color_secundario_hsv FROM entidades WHERE entity_id = %s",
+                (team_id,),
             )
             if row:
-                teams[team_id] = parse_hsv_from_db(row.get("color_primario_hsv"))
-    return teams
+                primary[team_id] = parse_hsv_from_db(row.get("color_primario_hsv"))
+                sec = parse_hsv_from_db(row.get("color_secundario_hsv"))
+                if sec is not None:
+                    secondary[team_id] = sec
+    return primary, secondary
 
 
 ANNOTATED_DIR = os.path.join(DATA_DIR, 'annotated')
@@ -88,10 +92,9 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
             person_model = YOLO('yolov8n.pt')  # COCO pre-entrenado
             class_names = model.names
 
-            # Colores de equipos y detector de overlay
-            team_colors = _load_team_colors(source_match_id)
-            overlay_detector = OverlayDetector()
-            log.append(f"[{now()}] Atribucion de equipos disponible: {list(team_colors.keys()) if team_colors else 'ninguno (partido sin equipos en BD)'}")
+            # Colores de equipos (primario + secundario)
+            team_colors, team_secondary = _load_team_colors(source_match_id)
+            log.append(f"[{now()}] Atribucion disponible para: {list(team_colors.keys()) if team_colors else 'ninguno'} (con secundarios: {list(team_secondary.keys())})")
 
             def ioa(logo_bbox, person_bbox):
                 lx1, ly1, lx2, ly2 = logo_bbox
@@ -146,7 +149,6 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
 
                     frame_dets = []
                     on_player_frame = 0
-                    overlay_frame = 0
                     for r in results:
                         if r.boxes is None:
                             continue
@@ -184,48 +186,26 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
                             color_dist = None
                             if on_player and team_colors:
                                 entity_id, color_dist = classify_team_by_color(
-                                    frame, [x1, y1, x2, y2], team_colors,
+                                    frame, [x1, y1, x2, y2], team_colors, team_secondary,
                                 )
                             else:
                                 entity_id = "liga_1"
 
-                            # Overlay vs fisico
-                            surface_info = overlay_detector.classify(
-                                frame, sponsor, frame_idx, [x1, y1, x2, y2], on_player,
-                            )
-                            is_overlay = surface_info["is_overlay"]
-                            surface_type = surface_info["surface_type"]
-                            if is_overlay:
-                                overlay_frame += 1
-
                             color = color_for(sponsor)
-                            # Estilos diferenciados por superficie
-                            if is_overlay:
-                                for dash_x in range(x1, x2, 8):
-                                    cv2.line(annotated, (dash_x, y1), (min(dash_x + 4, x2), y1), (255, 200, 0), 2)
-                                    cv2.line(annotated, (dash_x, y2), (min(dash_x + 4, x2), y2), (255, 200, 0), 2)
-                                for dash_y in range(y1, y2, 8):
-                                    cv2.line(annotated, (x1, dash_y), (x1, min(dash_y + 4, y2)), (255, 200, 0), 2)
-                                    cv2.line(annotated, (x2, dash_y), (x2, min(dash_y + 4, y2)), (255, 200, 0), 2)
-                                cv2.rectangle(annotated, (x1 + 2, y1 + 2), (x2 - 2, y2 - 2), color, 1)
-                            elif on_player:
-                                # Jugador real en cancha: doble borde cian
+                            # Estilos: jugador (cian doble) / tribuna (gris) / estadio (color simple)
+                            if on_player:
                                 cv2.rectangle(annotated, (x1 - 1, y1 - 1), (x2 + 1, y2 + 1), (0, 255, 255), 3)
                                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
                             elif source == "tribuna_staff":
-                                # Tribuna/staff: borde GRIS para indicar que se descarto como jugador
                                 cv2.rectangle(annotated, (x1 - 1, y1 - 1), (x2 + 1, y2 + 1), (150, 150, 150), 2)
                                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 1)
                             else:
                                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
 
-                            # Etiqueta con iconos
-                            if is_overlay:
-                                icon = "[*]"
-                            elif on_player:
-                                icon = "[J]"  # jugador real en cancha
+                            if on_player:
+                                icon = "[J]"
                             elif source == "tribuna_staff":
-                                icon = "[T]"  # tribuna / staff (descartado)
+                                icon = "[T]"
                             else:
                                 icon = "[V]"
 
@@ -252,12 +232,8 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
                                 "on_pitch": on_pitch,
                                 "pitch_ratio": pitch_ratio,
                                 "persons_in_frame": len(person_bboxes),
-                                # NUEVO: atribucion + superficie
                                 "entity_id": entity_id,
                                 "color_distance": round(color_dist, 2) if color_dist is not None else None,
-                                "surface_type": surface_type,
-                                "is_overlay": is_overlay,
-                                "overlay_stable_frames": surface_info.get("stable_frames", 0),
                             }
                             frame_dets.append(det)
                             detections_all.append(det)
@@ -265,7 +241,7 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
 
                     # Overlay con timestamp
                     ts = frame_idx / video_fps
-                    overlay_text = f"Frame {frame_idx} | {int(ts // 60):02d}:{int(ts % 60):02d} | {len(frame_dets)} logos ({on_player_frame} jugador, {overlay_frame} overlay) | {len(person_bboxes)} personas"
+                    overlay_text = f"Frame {frame_idx} | {int(ts // 60):02d}:{int(ts % 60):02d} | {len(frame_dets)} logos ({on_player_frame} jugador) | {len(person_bboxes)} personas"
                     cv2.putText(annotated, overlay_text, (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
                     cv2.putText(annotated, overlay_text, (10, 30),
@@ -306,9 +282,8 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
                 final_mp4 = tmp_mp4
                 log.append(f"[{now()}] ffmpeg warning: {result.stderr[-200:]}")
 
-            # Resumen por fuente (jugador vs estadio)
-            by_source = {"jugador": 0, "estadio": 0}
-            by_surface = {"fisico_camiseta": 0, "fisico_estadio": 0, "overlay_digital": 0}
+            # Resumen por fuente y por equipo
+            by_source = {"jugador": 0, "estadio": 0, "tribuna_staff": 0}
             by_entity: dict = {}
             sponsors_by_source: dict = {}
             sponsors_by_entity: dict = {}
@@ -317,16 +292,13 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
                 src = d.get("source", "estadio")
                 by_source[src] = by_source.get(src, 0) + 1
 
-                surf = d.get("surface_type", "fisico_estadio")
-                by_surface[surf] = by_surface.get(surf, 0) + 1
-
                 eid = d.get("entity_id") or "sin_equipo"
                 by_entity[eid] = by_entity.get(eid, 0) + 1
 
                 sp = d["sponsor"]
                 if sp not in sponsors_by_source:
-                    sponsors_by_source[sp] = {"jugador": 0, "estadio": 0}
-                sponsors_by_source[sp][src] += 1
+                    sponsors_by_source[sp] = {"jugador": 0, "estadio": 0, "tribuna_staff": 0}
+                sponsors_by_source[sp][src] = sponsors_by_source[sp].get(src, 0) + 1
 
                 if sp not in sponsors_by_entity:
                     sponsors_by_entity[sp] = {}
@@ -342,7 +314,6 @@ def analyze_video(source_match_id: str, fps: int = 5, confidence: float = 0.25) 
                     "total_detections": len(detections_all),
                     "teams_available": list(team_colors.keys()),
                     "by_source": by_source,
-                    "by_surface": by_surface,
                     "by_entity": by_entity,
                     "sponsors_summary": sponsor_counts,
                     "sponsors_by_source": sponsors_by_source,

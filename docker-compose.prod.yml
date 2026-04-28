@@ -1,0 +1,91 @@
+version: "3.8"
+
+# ╔═══════════════════════════════════════════════════════════╗
+# ║  PRODUCCION en VPS Contabo                                ║
+# ║  - MySQL como contenedor (no requiere mysql en host)      ║
+# ║  - Volumen para datos persistentes (videos, modelos, BD)  ║
+# ║  - Para arrancar: docker-compose -f docker-compose.prod.yml up -d
+# ╚═══════════════════════════════════════════════════════════╝
+
+services:
+  # ── MySQL ──
+  mysql:
+    image: mysql:8.0
+    container_name: sponsorship_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME:-sponsorship_mvp}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/seed_data.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      - ./sql/seed_usuarios.sql:/docker-entrypoint-initdb.d/03-seed-usuarios.sql:ro
+      - ./sql/tabla_sesiones.sql:/docker-entrypoint-initdb.d/04-sesiones.sql:ro
+      - ./sql/indices_optimizacion.sql:/docker-entrypoint-initdb.d/05-indices.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - sponsorship_net
+
+  # ── Backend API ──
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sponsorship_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ENV: production
+      DB_HOST: mysql
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-sponsorship_mvp}
+      DB_PORT: 3306
+      DB_POOL_SIZE: 10
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_HOURS: 24
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      RATE_LIMIT_PER_MINUTE: 60
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sponsorship_net
+
+  # ── Frontend Web ──
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: sponsorship_web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - sponsorship_net
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  sponsorship_net:
+    driver: bridge

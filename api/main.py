@@ -38,17 +38,17 @@ app.add_middleware(
 )
 
 
-# Rate limiting middleware
+# Rate limiting middleware — solo aplicado a endpoints sensibles (login)
+# Las rutas de admin GET/POST son frecuentes (polling, miniaturas, tokens) y satura
+# el limite si se aplica a todo. En produccion seria mejor por usuario+endpoint.
+RATE_LIMITED_PREFIXES = ("/api/auth/login", "/api/auth/register")
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    path = request.url.path
-    # Excluir health check y endpoints de polling de status (pipeline UI los consulta cada 2s)
-    skip_rate_limit = (
-        path == "/api/health"
-        or path.endswith("/status")
-        or "/status" in path
-    )
-    if not skip_rate_limit:
+    # Solo limita login/register para evitar brute-force
+    # Todo lo demas es del admin y puede hacer requests rapidas (thumbnails, polling, etc)
+    if request.method != "OPTIONS" and any(request.url.path.startswith(p) for p in RATE_LIMITED_PREFIXES):
         client_ip = request.client.host if request.client else "unknown"
         rate_limiter.check(client_ip)
     response = await call_next(request)
@@ -85,6 +85,9 @@ app.include_router(analyze.router, prefix="/api/training", tags=["Analizar Video
 
 from api.routers import catalog
 app.include_router(catalog.router, prefix="/api/catalog", tags=["Catalogo"])
+
+from api.routers import labeling
+app.include_router(labeling.router, prefix="/api/labeling", tags=["Etiquetado"])
 
 
 @app.get("/api/health")
