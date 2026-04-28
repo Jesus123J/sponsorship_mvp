@@ -102,8 +102,10 @@ export default function TrimVideoPage() {
     if (videoRef.current) setStartSec(Math.floor(videoRef.current.currentTime))
   }
 
+  const [trimStatus, setTrimStatus] = useState<any>(null)
+
   const doTrim = async () => {
-    setError(''); setResult(null)
+    setError(''); setResult(null); setTrimStatus(null)
     if (!selected) return setError('Selecciona un video')
     if (!outputId.trim()) return setError('Pon un match_id para el recorte')
     if (durationSec <= 0) return setError('Duracion debe ser mayor a 0')
@@ -125,12 +127,32 @@ export default function TrimVideoPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Error al cortar')
-      setResult(data)
-      authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+
+      // Polling del status del trim (corre en background ahora)
+      const pollInterval = setInterval(async () => {
+        try {
+          const s = await authFetch(`${API}/training/trim-video/status`).then(r => r.json())
+          setTrimStatus(s)
+          if (!s.running) {
+            clearInterval(pollInterval)
+            if (s.error) {
+              setError(s.error)
+            } else if (s.finished_at) {
+              setResult({
+                match_id: outputId.trim(),
+                size_mb: s.size_mb,
+                duration_seg: durationSec,
+              })
+              authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+            }
+            setTrimming(false)
+          }
+        } catch {}
+      }, 1000)
     } catch (err: any) {
       setError(err.message)
+      setTrimming(false)
     }
-    setTrimming(false)
   }
 
   const presets = [
@@ -321,7 +343,7 @@ export default function TrimVideoPage() {
                   {trimming ? (
                     <>
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      Cortando...
+                      Cortando... {trimStatus?.percent || 0}%
                     </>
                   ) : (
                     <>
@@ -332,6 +354,20 @@ export default function TrimVideoPage() {
                     </>
                   )}
                 </button>
+
+                {/* Barra de progreso del trim */}
+                {trimStatus && trimStatus.running && (
+                  <div className="mt-3 bg-indigo-50 border border-indigo-200 rounded-xl p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-semibold text-indigo-900">{trimStatus.progress}</p>
+                      <span className="text-sm font-bold text-indigo-700">{trimStatus.percent || 0}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-indigo-200 rounded-full overflow-hidden">
+                      <div className="h-full bg-indigo-600 transition-all duration-300"
+                        style={{ width: `${trimStatus.percent || 0}%` }} />
+                    </div>
+                  </div>
+                )}
 
                 {error && (
                   <div className="mt-3 bg-red-50 border border-red-200 rounded-xl p-3">

@@ -352,7 +352,7 @@ export default function EtiquetarPage() {
   }, [currentFrame, selectedBoxIdx, boxes, saveAnnotations, runAutoDetect])
 
   const packageAndTrain = async (autoTrain: boolean, useSelection: boolean = false) => {
-    setPackaging(true); setPackageResult(null)
+    setPackaging(true); setPackageResult(null); setPackageStatus(null)
     try {
       const payload: any = {
         match_id: selectedMatch || null,
@@ -371,9 +371,24 @@ export default function EtiquetarPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      setPackageResult(data)
-    } catch (e: any) { setPackageResult({ error: e.message }) }
-    setPackaging(false)
+      // Polling del status — el package corre async
+      const pollId = setInterval(async () => {
+        try {
+          const s = await authFetch(`${API}/labeling/package/status`).then(r => r.json())
+          setPackageStatus(s)
+          if (!s.running) {
+            clearInterval(pollId)
+            setPackaging(false)
+            if (s.error) {
+              setPackageResult({ error: s.error })
+            } else if (s.result) {
+              setPackageResult({ ...s.result, training_started: autoTrain })
+            }
+            authFetch(`${API}/labeling/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+          }
+        } catch {}
+      }, 1000)
+    } catch (e: any) { setPackageResult({ error: e.message }); setPackaging(false) }
   }
 
   const createNewClass = async () => {
@@ -394,12 +409,15 @@ export default function EtiquetarPage() {
     } catch (e: any) { alert(e.message) }
   }
 
+  const [batchStatus, setBatchStatus] = useState<any>(null)
+  const [packageStatus, setPackageStatus] = useState<any>(null)
+
   const batchAutoDetect = async () => {
     if (!selectedMatch || selectedSeconds.size === 0) {
       return alert('Selecciona frames primero (modo seleccion)')
     }
     if (!confirm(`Correr auto-detect en ${selectedSeconds.size} frames? Las anotaciones existentes se sobrescriben.`)) return
-    setBatchDetecting(true)
+    setBatchDetecting(true); setBatchStatus(null)
     try {
       const res = await authFetch(`${API}/labeling/${selectedMatch}/batch-auto-detect`, {
         method: 'POST',
@@ -410,13 +428,21 @@ export default function EtiquetarPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      alert(`✅ ${data.frames_processed} frames procesados, ${data.total_boxes_added} cajas agregadas`)
-      // Recargar lista
-      authFetch(`${API}/labeling/${selectedMatch}/frames?page=${page}&per_page=60`)
-        .then(r => r.json()).then(setFramesData).catch(() => {})
-      authFetch(`${API}/labeling/videos`).then(r => r.json()).then(setVideos).catch(() => {})
-    } catch (e: any) { alert(e.message) }
-    setBatchDetecting(false)
+      // Polling — corre en background
+      const pollId = setInterval(async () => {
+        try {
+          const s = await authFetch(`${API}/labeling/batch-auto-detect/status`).then(r => r.json())
+          setBatchStatus(s)
+          if (!s.running) {
+            clearInterval(pollId)
+            setBatchDetecting(false)
+            authFetch(`${API}/labeling/${selectedMatch}/frames?page=${page}&per_page=60`)
+              .then(r => r.json()).then(setFramesData).catch(() => {})
+            authFetch(`${API}/labeling/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+          }
+        } catch {}
+      }, 1000)
+    } catch (e: any) { alert(e.message); setBatchDetecting(false) }
   }
 
   const toggleSelect = (second: number) => {
@@ -483,6 +509,41 @@ export default function EtiquetarPage() {
           )}
         </div>
       </div>
+
+      {/* Progreso de batch auto-detect en vivo */}
+      {batchStatus && batchStatus.running && (
+        <div className="mb-4 bg-indigo-50 border-2 border-indigo-200 rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm font-semibold text-indigo-900">🤖 Auto-detect en curso</p>
+            </div>
+            <span className="text-lg font-bold text-indigo-700">{batchStatus.percent || 0}%</span>
+          </div>
+          <p className="text-xs text-indigo-700 mb-2">{batchStatus.progress}</p>
+          <div className="w-full h-2 bg-indigo-200 rounded-full overflow-hidden">
+            <div className="h-full bg-indigo-600 transition-all duration-300"
+              style={{ width: `${batchStatus.percent || 0}%` }} />
+          </div>
+          <p className="text-[10px] text-indigo-600 mt-2">
+            {batchStatus.frames_processed || 0}/{batchStatus.total_frames || 0} frames · {batchStatus.total_boxes_added || 0} cajas detectadas
+          </p>
+        </div>
+      )}
+
+      {/* Progreso del empaquetado */}
+      {packageStatus && packageStatus.running && (
+        <div className="mb-4 bg-purple-50 border-2 border-purple-200 rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm font-semibold text-purple-900">📦 Empaquetando dataset</p>
+            </div>
+            <span className="text-lg font-bold text-purple-700">{packageStatus.percent || 0}%</span>
+          </div>
+          <p className="text-xs text-purple-700">{packageStatus.progress}</p>
+        </div>
+      )}
 
       {packageResult && (
         <div className={`mb-6 rounded-xl p-4 ${packageResult.error ? 'bg-red-50 border border-red-200' : 'bg-emerald-50 border border-emerald-200'}`}>
