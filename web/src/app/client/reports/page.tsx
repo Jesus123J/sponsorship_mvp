@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { getSponsors, getBrandDetections, getMenciones } from '@/lib/api'
 import FilterBar from '@/components/FilterBar'
 import ExportPDF from '@/components/ExportPDF'
+import ErrorAlert from '@/components/ErrorAlert'
 
 export default function ClientReports() {
   const [sponsors, setSponsors] = useState<any[]>([])
@@ -10,15 +11,17 @@ export default function ClientReports() {
   const [data, setData] = useState<any[]>([])
   const [menciones, setMenciones] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [filters, setFilters] = useState({
     matchId: '', sponsorId: '', entityId: '', positionType: '', matchPeriod: ''
   })
 
-  useEffect(() => { getSponsors().then(setSponsors).catch(() => {}) }, [])
+  useEffect(() => { getSponsors().then(setSponsors).catch((e) => setError(e.message)) }, [])
 
-  useEffect(() => {
+  const loadData = () => {
     if (!selectedSponsor) { setData([]); setMenciones([]); setLoading(false); return }
     setLoading(true)
+    setError(null)
     Promise.all([
       getBrandDetections(selectedSponsor, {
         match_id: filters.matchId || undefined,
@@ -28,18 +31,23 @@ export default function ClientReports() {
       getMenciones(selectedSponsor, filters.matchId || undefined),
     ])
       .then(([dets, mencs]) => {
-        setData(dets)
+        const rows = dets.data || dets
+        setData(Array.isArray(rows) ? rows : [])
         setMenciones(mencs)
         setLoading(false)
       })
-      .catch(() => { setData([]); setMenciones([]); setLoading(false) })
-  }, [selectedSponsor, filters])
+      .catch((e) => { setError(e.message); setData([]); setMenciones([]); setLoading(false) })
+  }
+
+  useEffect(() => { loadData() }, [selectedSponsor, filters])
 
   const fmt = (n: number) => `S/. ${n.toLocaleString('es-PE', { maximumFractionDigits: 0 })}`
-  const totalSMV = data.reduce((s, d) => s + d.smv, 0)
+  const totalSMV = data.reduce((s: number, d: any) => s + (d.smv || 0), 0)
 
   return (
     <div>
+      {error && <ErrorAlert message={error} onRetry={loadData} />}
+
       <div className="flex justify-between items-start mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Reportes Detallados</h1>

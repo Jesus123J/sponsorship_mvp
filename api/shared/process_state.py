@@ -17,9 +17,25 @@ process_status = {
     "youtube": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
     "extract": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
     "zip": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
+    "analyze": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None},
+    "trim": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None, "percent": 0},
+    "batch_detect": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None, "percent": 0},
+    "package": {"running": False, "progress": "", "log": [], "finished_at": None, "error": None, "percent": 0},
 }
+
+# Tareas R2 (upload/download): { task_id: { running, progress, transferred_mb, total_mb, ... } }
+r2_tasks: dict = {}
 
 
 def now() -> str:
     """Timestamp corto para logs."""
     return datetime.now().strftime("%H:%M:%S")
+
+
+def reset_all_processes():
+    """Resetea todos los procesos bloqueados."""
+    for key in process_status:
+        process_status[key] = {
+            "running": False, "progress": "", "log": [],
+            "finished_at": None, "error": None,
+        }

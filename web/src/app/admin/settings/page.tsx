@@ -1,15 +1,19 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { getParametros, getMultiplicadores, getSponsors } from '@/lib/api'
+import ErrorAlert from '@/components/ErrorAlert'
 
 export default function SettingsPage() {
   const [parametros, setParametros] = useState<any[]>([])
   const [multiplicadores, setMultiplicadores] = useState<any[]>([])
   const [sponsors, setSponsors] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'parametros' | 'multiplicadores' | 'sponsors'>('parametros')
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true)
+    setError(null)
     Promise.all([getParametros(), getMultiplicadores(), getSponsors()])
       .then(([p, m, s]) => {
         setParametros(p)
@@ -17,14 +21,18 @@ export default function SettingsPage() {
         setSponsors(s)
         setLoading(false)
       })
-      .catch(() => setLoading(false))
-  }, [])
+      .catch((e) => { setError(e.message); setLoading(false) })
+  }
+
+  useEffect(() => { loadData() }, [])
 
   const tabs = [
     { key: 'parametros' as const, label: 'Parametros de valoracion', count: parametros.length },
     { key: 'multiplicadores' as const, label: 'Multiplicadores contexto', count: multiplicadores.length },
     { key: 'sponsors' as const, label: 'Sponsors registrados', count: sponsors.length },
   ]
+
+  if (error) return <ErrorAlert message={error} onRetry={loadData} />
 
   return (
     <div>

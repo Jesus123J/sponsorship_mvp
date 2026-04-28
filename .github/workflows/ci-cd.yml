@@ -61,6 +61,14 @@ jobs:
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/tabla_sesiones.sql
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < sql/indices_optimizacion.sql
 
+          # Aplicar migraciones (es_prueba, estadios, torneos, secondary colors)
+          if [ -d sql/migrations ]; then
+            for f in sql/migrations/*.sql; do
+              echo "Aplicando $(basename $f)..."
+              mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp < "$f" 2>&1 | grep -v "Duplicate" || true
+            done
+          fi
+
           # Crear usuario admin de test con hash generado aqui
           HASH=$(python -c "import bcrypt; print(bcrypt.hashpw(b'demo2025', bcrypt.gensalt()).decode())")
           mysql -h 127.0.0.1 -u root -ptest_password sponsorship_mvp -e "
@@ -73,7 +81,7 @@ jobs:
             ('admin@sponsorshipmvp.pe', '$HASH', 'Administrador Liga 1', 'admin', NULL),
             ('cliente@test.pe', '$HASH', 'Cliente Test', 'client', 'apuesta_total');
           "
-          echo "BD de test lista con usuario admin"
+          echo "BD de test lista con migraciones aplicadas"
 
       - name: Test 1 — Imports y estructura
         run: |
@@ -273,13 +281,15 @@ jobs:
             -d '{"email":"","password":"123456"}')
           [ "$CODE" = "422" ] && echo "PASS — Email vacio rechazado (422)"
 
-      - name: Test 9 — Rate limiting
+      - name: Test 9 — Rate limiting (solo en /auth/login)
         run: |
-          # Hacer 65 requests rapidos (limite es 60/min)
+          # El rate limit solo aplica a /api/auth/login para evitar brute-force
           for i in $(seq 1 65); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/plans/)
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/auth/login \
+              -H "Content-Type: application/json" \
+              -d '{"email":"noexiste@test.com","password":"abc123"}')
             if [ "$CODE" = "429" ]; then
-              echo "PASS — Rate limit activo despues de $i requests (HTTP 429)"
+              echo "PASS — Rate limit en login activo despues de $i requests (HTTP 429)"
               exit 0
             fi
           done
@@ -385,50 +395,193 @@ jobs:
   # └────────────────────────────────────────────────────┘
 
   deploy:
-    name: Deploy — VPS Produccion
+    name: Deploy — VPS Produccion (auto-setup + push)
     runs-on: ubuntu-latest
-    needs: [docker-build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: production
+    needs: [backend-tests, frontend-build]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
 
     steps:
       - name: Verificar configuracion de deploy
+        id: check
         run: |
           if [ -z "${{ secrets.VPS_HOST }}" ]; then
-            echo "========================================"
-            echo "  Deploy pendiente — VPS no configurado"
-            echo "========================================"
-            echo ""
-            echo "  Cuando tengas tu VPS de Hostinger:"
-            echo ""
-            echo "  1. Agrega estos secrets en GitHub:"
-            echo "     VPS_HOST, VPS_USER, VPS_SSH_KEY"
-            echo "     VPS_PORT, DB_PASSWORD, JWT_SECRET"
-            echo ""
-            echo "  2. Instala Docker en el VPS"
-            echo "  3. Clona el repo en /app"
-            echo "  4. El deploy sera automatico"
-            echo ""
-            echo "========================================"
-            exit 0
+            echo "VPS no configurado — saltando deploy. Agrega los secrets en GitHub."
+            echo "configured=false" >> $GITHUB_OUTPUT
+          else
+            echo "VPS configurado — procediendo con deploy"
+            echo "configured=true" >> $GITHUB_OUTPUT
+            # Determina si autenticar con key o password
+            if [ -n "${{ secrets.VPS_SSH_KEY }}" ]; then
+              echo "auth=key" >> $GITHUB_OUTPUT
+            else
+              echo "auth=password" >> $GITHUB_OUTPUT
+            fi
           fi
 
-      # Descomenta esto cuando tengas el VPS:
-      #
-      # - name: Deploy via SSH
-      #   uses: appleboy/ssh-action@v1
-      #   with:
-      #     host: ${{ secrets.VPS_HOST }}
-      #     username: ${{ secrets.VPS_USER }}
-      #     key: ${{ secrets.VPS_SSH_KEY }}
-      #     port: ${{ secrets.VPS_PORT }}
-      #     script: |
-      #       cd /app
-      #       git pull origin main
-      #       docker-compose build --no-cache
-      #       docker-compose up -d
-      #       docker-compose ps
-      #       echo "Deploy completado: $(date)"
+      # ────────────────────────────────────────────
+      # AUTH POR SSH KEY (recomendado, mas seguro)
+      # ────────────────────────────────────────────
+      - name: Deploy via SSH (key)
+        if: steps.check.outputs.configured == 'true' && steps.check.outputs.auth == 'key'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          timeout: 600s
+          command_timeout: 60m
+          script: ${{ env.DEPLOY_SCRIPT }}
+        env:
+          DEPLOY_SCRIPT: |
+            set -e
+            BRANCH="${{ github.ref_name }}"
+            APP_DIR="/opt/sponsorship_mvp"
+
+            echo "================================================"
+            echo "  Deploy automatico — $(date)"
+            echo "  Branch: $BRANCH"
+            echo "================================================"
+
+            # ── 1. Instalar dependencias del sistema si faltan ──
+            if ! command -v docker &> /dev/null || ! command -v git &> /dev/null; then
+              echo "==> Primera vez — instalando dependencias del sistema..."
+              apt-get update -y
+              apt-get install -y git curl ufw
+              if ! command -v docker &> /dev/null; then
+                curl -fsSL https://get.docker.com | sh
+                systemctl enable docker
+                systemctl start docker
+              fi
+              apt-get install -y docker-compose-plugin
+              ufw allow 22/tcp
+              ufw allow 8000/tcp
+              ufw allow 3000/tcp
+              ufw allow 80/tcp
+              ufw allow 443/tcp
+              ufw --force enable || true
+            fi
+
+            # ── 2. Clonar repo si no existe ──
+            if [ ! -d "$APP_DIR/.git" ]; then
+              echo "==> Primera vez — clonando repo..."
+              git clone -b "$BRANCH" https://github.com/${{ github.repository }}.git "$APP_DIR"
+            fi
+
+            cd "$APP_DIR"
+
+            # ── 3. Pull ultima version ──
+            echo "==> Actualizando codigo..."
+            git fetch --all
+            git reset --hard "origin/$BRANCH"
+
+            # ── 4. Generar/Actualizar .env ──
+            PUBLIC_IP=$(curl -s ifconfig.me || echo "${{ secrets.VPS_HOST }}")
+            if [ ! -f .env ]; then
+              echo "==> Primera vez — generando .env..."
+              cp .env.production.example .env
+              DB_PASS=$(openssl rand -hex 16)
+              JWT_KEY=$(openssl rand -hex 32)
+              sed -i "s|cambiar_este_password_super_seguro|$DB_PASS|g" .env
+              sed -i "s|cambiar_este_secreto_de_minimo_64_caracteres_aleatorios|$JWT_KEY|g" .env
+              sed -i "s|45.88.191.29|$PUBLIC_IP|g" .env
+              echo "==> Credenciales generadas (guardadas en /root/.deploy_credentials.txt)"
+              echo "DB_PASSWORD=$DB_PASS" > /root/.deploy_credentials.txt
+              echo "JWT_SECRET=$JWT_KEY" >> /root/.deploy_credentials.txt
+              chmod 600 /root/.deploy_credentials.txt
+            fi
+
+            # ── 4b. Asegurar que CORS_ORIGINS y NEXT_PUBLIC_API_URL apunten a la IP publica ──
+            # NEXT_PUBLIC_API_URL DEBE terminar en /api (el codigo hace `${API}/training/...`)
+            echo "==> Verificando URLs publicas en .env..."
+            grep -q "^CORS_ORIGINS=" .env || echo "CORS_ORIGINS=http://$PUBLIC_IP:3000" >> .env
+            grep -q "^NEXT_PUBLIC_API_URL=" .env || echo "NEXT_PUBLIC_API_URL=http://$PUBLIC_IP:8000/api" >> .env
+            sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://$PUBLIC_IP:3000|" .env
+            sed -i "s|^NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=http://$PUBLIC_IP:8000/api|" .env
+
+            # ── 5. Build + arrancar ──
+            echo "==> Build + start contenedores..."
+            docker compose -f docker-compose.prod.yml up -d --build
+
+            # ── 6. Migraciones ──
+            echo "==> Esperando MySQL..."
+            sleep 12
+            echo "==> Aplicando migraciones..."
+            docker compose -f docker-compose.prod.yml exec -T api python -m scripts.migrate || true
+
+            # ── 7. Estado final ──
+            echo ""
+            echo "==> Estado de contenedores:"
+            docker compose -f docker-compose.prod.yml ps
+            echo ""
+            echo "================================================"
+            echo "  ✅ Deploy completado: $(date)"
+            echo "  Frontend: http://${{ secrets.VPS_HOST }}:3000"
+            echo "  API:      http://${{ secrets.VPS_HOST }}:8000/api/health"
+            echo "================================================"
+
+      # ────────────────────────────────────────────
+      # AUTH POR PASSWORD (fallback, menos seguro)
+      # ────────────────────────────────────────────
+      - name: Deploy via SSH (password)
+        if: steps.check.outputs.configured == 'true' && steps.check.outputs.auth == 'password'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          timeout: 600s
+          command_timeout: 60m
+          script: |
+            set -e
+            BRANCH="${{ github.ref_name }}"
+            APP_DIR="/opt/sponsorship_mvp"
+
+            echo "================================================"
+            echo "  Deploy automatico — $(date)"
+            echo "  Branch: $BRANCH"
+            echo "================================================"
+
+            if ! command -v docker &> /dev/null || ! command -v git &> /dev/null; then
+              echo "==> Primera vez — instalando dependencias..."
+              apt-get update -y
+              apt-get install -y git curl ufw
+              if ! command -v docker &> /dev/null; then
+                curl -fsSL https://get.docker.com | sh
+                systemctl enable docker && systemctl start docker
+              fi
+              apt-get install -y docker-compose-plugin
+              ufw allow 22/tcp; ufw allow 8000/tcp; ufw allow 3000/tcp
+              ufw allow 80/tcp; ufw allow 443/tcp
+              ufw --force enable || true
+            fi
+
+            if [ ! -d "$APP_DIR/.git" ]; then
+              git clone -b "$BRANCH" https://github.com/${{ github.repository }}.git "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            git fetch --all
+            git reset --hard "origin/$BRANCH"
+
+            if [ ! -f .env ]; then
+              cp .env.production.example .env
+              DB_PASS=$(openssl rand -hex 16)
+              JWT_KEY=$(openssl rand -hex 32)
+              PUBLIC_IP=$(curl -s ifconfig.me || echo "${{ secrets.VPS_HOST }}")
+              sed -i "s|cambiar_este_password_super_seguro|$DB_PASS|g" .env
+              sed -i "s|cambiar_este_secreto_de_minimo_64_caracteres_aleatorios|$JWT_KEY|g" .env
+              sed -i "s|45.88.191.29|$PUBLIC_IP|g" .env
+              echo "DB_PASSWORD=$DB_PASS" > /root/.deploy_credentials.txt
+              echo "JWT_SECRET=$JWT_KEY" >> /root/.deploy_credentials.txt
+              chmod 600 /root/.deploy_credentials.txt
+            fi
+
+            docker compose -f docker-compose.prod.yml up -d --build
+            sleep 12
+            docker compose -f docker-compose.prod.yml exec -T api python -m scripts.migrate || true
+            docker compose -f docker-compose.prod.yml ps
+            echo "✅ Deploy OK — http://${{ secrets.VPS_HOST }}:3000"
 
       - name: Resumen
         run: |
@@ -439,6 +592,21 @@ jobs:
           echo "  Actor:     ${{ github.actor }}"
           echo "  Tests:     OK"
           echo "  Build:     OK"
-          echo "  Docker:    OK"
-          echo "  Deploy:    Pendiente (configurar VPS)"
+          if [ "${{ steps.check.outputs.configured }}" = "true" ]; then
+            echo "  Deploy:    OK (auth: ${{ steps.check.outputs.auth }})"
+            echo "  URL:       http://${{ secrets.VPS_HOST }}:3000"
+            echo "  API:       http://${{ secrets.VPS_HOST }}:8000/api/health"
+          else
+            echo "  Deploy:    Pendiente"
+            echo ""
+            echo "  Para activar deploy automatico, agrega en"
+            echo "  https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo ""
+            echo "  Secrets requeridos:"
+            echo "    VPS_HOST     = 45.88.191.29"
+            echo "    VPS_USER     = root"
+            echo "    VPS_PASSWORD = (tu password)  <- mas simple"
+            echo "  o:"
+            echo "    VPS_SSH_KEY  = (tu llave privada)  <- mas seguro"
+          fi
           echo "========================================"

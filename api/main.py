@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from api.core.config import CORS_ORIGINS, API_VERSION, ENV
 from api.core.rate_limit import rate_limiter
-from api.routers import dashboard, sponsors, matches, detections, settings, auth, plans, training, videos, pipeline
+from api.routers import dashboard, sponsors, matches, detections, settings, auth, plans, training, videos, pipeline, users
 
 # Logging
 logging.basicConfig(
@@ -38,14 +38,31 @@ app.add_middleware(
 )
 
 
-# Rate limiting middleware
+# Rate limiting middleware — protege endpoints de auth contra brute-force
+# Otros endpoints (admin GET/POST) no se limitan: requieren JWT y son llamados
+# por el dashboard del admin (no son publicos).
+SENSITIVE_PREFIXES = ("/api/auth/login", "/api/auth/register")
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Excluir health check del rate limit
-    if request.url.path != "/api/health":
+    if request.method != "OPTIONS" and any(request.url.path.startswith(p) for p in SENSITIVE_PREFIXES):
         client_ip = request.client.host if request.client else "unknown"
         rate_limiter.check(client_ip)
     response = await call_next(request)
+    return response
+
+
+# Security headers middleware — agrega headers de seguridad a todas las respuestas
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    if ENV == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -69,9 +86,22 @@ app.include_router(matches.router, prefix="/api/matches", tags=["Partidos"])
 app.include_router(detections.router, prefix="/api/detections", tags=["Detecciones"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Configuracion"])
 app.include_router(plans.router, prefix="/api/plans", tags=["Planes"])
+app.include_router(users.router, prefix="/api/users", tags=["Gestion de Usuarios"])
 app.include_router(training.router, prefix="/api/training", tags=["Training YOLO"])
 app.include_router(videos.router, prefix="/api/training", tags=["Videos y Frames"])
 app.include_router(pipeline.router, prefix="/api/training", tags=["Pipeline Deteccion"])
+
+from api.routers import analyze
+app.include_router(analyze.router, prefix="/api/training", tags=["Analizar Video"])
+
+from api.routers import catalog
+app.include_router(catalog.router, prefix="/api/catalog", tags=["Catalogo"])
+
+from api.routers import labeling
+app.include_router(labeling.router, prefix="/api/labeling", tags=["Etiquetado"])
+
+from api.routers import storage
+app.include_router(storage.router, prefix="/api/storage", tags=["Cloud Storage R2"])
 
 
 @app.get("/api/health")

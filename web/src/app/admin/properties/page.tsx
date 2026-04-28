@@ -3,34 +3,43 @@ import { useEffect, useState } from 'react'
 import { getClubs, getPropertyDetections } from '@/lib/api'
 import FilterBar from '@/components/FilterBar'
 import ExportPDF from '@/components/ExportPDF'
+import ErrorAlert from '@/components/ErrorAlert'
 
 export default function PropertyView() {
   const [entidades, setEntidades] = useState<any[]>([])
   const [selectedEntity, setSelectedEntity] = useState('')
   const [data, setData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [clubsError, setClubsError] = useState<string | null>(null)
   const [filters, setFilters] = useState({
     matchId: '', sponsorId: '', entityId: '', positionType: '', matchPeriod: ''
   })
 
-  useEffect(() => { getClubs().then(setEntidades).catch(() => {}) }, [])
-
   useEffect(() => {
+    getClubs().then(setEntidades).catch((e) => setClubsError(e.message))
+  }, [])
+
+  const loadData = () => {
     if (!selectedEntity) { setData([]); setLoading(false); return }
     setLoading(true)
+    setError(null)
     getPropertyDetections(selectedEntity, {
       match_id: filters.matchId || undefined,
       position_type: filters.positionType || undefined,
     })
-      .then(rows => {
-        setData(rows.map(r => ({
+      .then(result => {
+        const rows = result.data || result
+        setData((Array.isArray(rows) ? rows : []).map((r: any) => ({
           sponsor: r.nombre || r.sponsor_id, smv: r.smv, count: r.detecciones,
           localCount: r.local_count, visitCount: r.visit_count,
         })))
         setLoading(false)
       })
-      .catch(() => { setData([]); setLoading(false) })
-  }, [selectedEntity, filters])
+      .catch((e) => { setError(e.message); setData([]); setLoading(false) })
+  }
+
+  useEffect(() => { loadData() }, [selectedEntity, filters])
 
   const fmt = (n: number) => `S/. ${n.toLocaleString('es-PE', { maximumFractionDigits: 0 })}`
   const totalSMV = data.reduce((s, d) => s + d.smv, 0)
@@ -44,6 +53,9 @@ export default function PropertyView() {
         </div>
         <ExportPDF targetId="property-content" filename="property-view-report" />
       </div>
+
+      {clubsError && <ErrorAlert message={clubsError} onRetry={() => { setClubsError(null); getClubs().then(setEntidades).catch((e) => setClubsError(e.message)) }} />}
+      {error && <ErrorAlert message={error} onRetry={loadData} />}
 
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mb-5">
         <label className="text-sm text-gray-500 block mb-3">Selecciona un club:</label>

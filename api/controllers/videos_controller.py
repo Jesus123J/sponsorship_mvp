@@ -2,19 +2,200 @@
 import os
 import zipfile
 import threading
+import subprocess
+import time
 from datetime import datetime
 from api.shared.process_state import (
     DATA_DIR, VIDEOS_DIR, FRAMES_DIR, process_status, now,
 )
 
 
-def download_youtube(url: str, match_id: str) -> dict:
-    """Descarga video de YouTube en background."""
+def trim_video(source_match_id: str, output_match_id: str, start_seconds: float, duration_seconds: float) -> dict:
+    """Inicia corte de video en BACKGROUND y retorna inmediatamente.
+
+    El progreso se actualiza en process_status['trim'] con percent y log.
+    """
+    if process_status.get("trim", {}).get("running"):
+        return {"error": "Ya hay un corte de video en curso", "status": 409}
+
+    src_path = os.path.join(VIDEOS_DIR, f'{source_match_id}.mp4')
+    if not os.path.exists(src_path):
+        return {"error": f"Video fuente no encontrado: {source_match_id}", "status": 404}
+
+    output_match_id = output_match_id.strip().replace(' ', '_')
+    if not output_match_id:
+        return {"error": "output_match_id es requerido", "status": 400}
+
+    dst_path = os.path.join(VIDEOS_DIR, f'{output_match_id}.mp4')
+    if os.path.abspath(dst_path) == os.path.abspath(src_path):
+        return {"error": "El match_id destino no puede ser igual al origen", "status": 400}
+    if os.path.exists(dst_path):
+        return {"error": f"Ya existe un video con match_id '{output_match_id}'. Elige otro.", "status": 409}
+
+    if start_seconds < 0:
+        start_seconds = 0
+    if duration_seconds <= 0 or duration_seconds > 3600:
+        return {"error": "Duracion debe estar entre 1 y 3600 segundos", "status": 400}
+
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+
+    process_status["trim"] = {
+        "running": True,
+        "progress": "Iniciando corte...",
+        "percent": 0,
+        "log": [],
+        "match_id": output_match_id,
+        "finished_at": None,
+        "error": None,
+    }
+
+    def worker():
+        log = process_status["trim"]["log"]
+        try:
+            log.append(f"[{now()}] Cortando {source_match_id}.mp4 → {output_match_id}.mp4 ({duration_seconds}s desde {start_seconds}s)")
+            # Intento 1: copy (rapido)
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start_seconds), "-i", src_path,
+                "-t", str(duration_seconds), "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-progress", "pipe:1", "-nostats",
+                dst_path,
+            ]
+            ok = _run_ffmpeg_with_progress(cmd, duration_seconds, log)
+
+            if not ok:
+                log.append(f"[{now()}] -c copy fallo, reintentando con re-encode...")
+                if os.path.exists(dst_path):
+                    os.remove(dst_path)
+                cmd2 = [
+                    "ffmpeg", "-y",
+                    "-ss", str(start_seconds), "-i", src_path,
+                    "-t", str(duration_seconds),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac",
+                    "-progress", "pipe:1", "-nostats",
+                    dst_path,
+                ]
+                ok = _run_ffmpeg_with_progress(cmd2, duration_seconds, log)
+
+            if not ok or not os.path.exists(dst_path):
+                process_status["trim"]["error"] = "ffmpeg fallo, ver log"
+                process_status["trim"]["progress"] = "Error en ffmpeg"
+                return
+
+            size_mb = round(os.path.getsize(dst_path) / (1024 * 1024), 2)
+            log.append(f"[{now()}] -> {size_mb} MB, listo")
+            process_status["trim"]["percent"] = 100
+            process_status["trim"]["progress"] = f"Completado — {size_mb} MB"
+            process_status["trim"]["size_mb"] = size_mb
+            process_status["trim"]["filename"] = f"{output_match_id}.mp4"
+            process_status["trim"]["finished_at"] = now()
+        except Exception as e:
+            process_status["trim"]["error"] = str(e)
+            log.append(f"[{now()}] ERROR: {e}")
+        finally:
+            process_status["trim"]["running"] = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {
+        "message": "Corte iniciado en background",
+        "match_id": output_match_id,
+        "source_match_id": source_match_id,
+        "duration_seg": duration_seconds,
+        "start_seg": start_seconds,
+    }
+
+
+def _run_ffmpeg_with_progress(cmd: list, total_duration_sec: float, log: list) -> bool:
+    """Corre ffmpeg parseando -progress pipe:1 y actualizando percent."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stderr_lines = []
+
+        # Lee stdout linea por linea para capturar progress
+        while True:
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line:
+                if proc.poll() is not None:
+                    break
+                continue
+            line = line.strip()
+            if line.startswith("out_time_ms="):
+                try:
+                    micro = int(line.split("=")[1])
+                    seconds = micro / 1_000_000
+                    pct = min(99, int((seconds / total_duration_sec) * 100))
+                    process_status["trim"]["percent"] = pct
+                    process_status["trim"]["progress"] = f"Cortando {pct}%..."
+                except Exception:
+                    pass
+
+        # Capturar stderr al final (errores)
+        if proc.stderr:
+            stderr_lines = proc.stderr.read().splitlines()
+        if proc.returncode != 0:
+            log.append(f"   stderr: {' '.join(stderr_lines[-3:])[:200]}")
+            return False
+        return True
+    except FileNotFoundError:
+        log.append("   ffmpeg no esta instalado")
+        return False
+    except Exception as e:
+        log.append(f"   excepcion: {e}")
+        return False
+
+
+def get_trim_status() -> dict:
+    return process_status.get("trim", {"running": False})
+
+
+def get_video_info(match_id: str) -> dict:
+    """Lee duracion y resolucion de un video con ffprobe."""
+    path = os.path.join(VIDEOS_DIR, f'{match_id}.mp4')
+    if not os.path.exists(path):
+        return {"error": "Video no encontrado", "status": 404}
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration,size:stream=width,height,codec_type",
+             "-of", "default=noprint_wrappers=1", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        info: dict = {"match_id": match_id, "size_mb": round(os.path.getsize(path) / (1024 * 1024), 2)}
+        for line in result.stdout.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                if k == 'duration': info['duration_seg'] = round(float(v), 1)
+                elif k == 'width' and 'width' not in info: info['width'] = int(v)
+                elif k == 'height' and 'height' not in info: info['height'] = int(v)
+        return info
+    except Exception as e:
+        return {"error": str(e), "status": 500}
+
+
+def download_youtube(url: str, match_id: str, quality: str = "480") -> dict:
+    """Descarga video de YouTube en background.
+
+    quality: "480" (rapido, ~200MB), "720" (medio, ~500MB), "1080" (pesado, ~1GB+)
+    Para deteccion de logos, 480p es suficiente.
+    """
     if process_status.get("youtube", {}).get("running"):
         return {"error": "Ya hay una descarga en curso", "status": 409}
 
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     output_path = os.path.join(VIDEOS_DIR, f'{match_id}.mp4')
+
+    # Formatos por calidad — forzar H.264 (compatible con OpenCV) + audio
+    # vcodec!=av01 excluye AV1 que no funciona en el contenedor
+    format_map = {
+        "360": "bestvideo[height<=360][vcodec^=avc]+bestaudio/best[height<=360]",
+        "480": "bestvideo[height<=480][vcodec^=avc]+bestaudio/best[height<=480]",
+        "720": "bestvideo[height<=720][vcodec^=avc]+bestaudio/best[height<=720]",
+        "1080": "bestvideo[height<=1080][vcodec^=avc]+bestaudio/best[height<=1080]",
+    }
+    video_format = format_map.get(quality, format_map["1080"])
 
     def download_worker():
         process_status["youtube"] = {
@@ -26,6 +207,7 @@ def download_youtube(url: str, match_id: str) -> dict:
         try:
             import yt_dlp
             log.append(f"[{now()}] Descargando: {url}")
+            log.append(f"[{now()}] Calidad: {quality}p")
 
             def progress_hook(d):
                 if d['status'] == 'downloading':
@@ -37,18 +219,33 @@ def download_youtube(url: str, match_id: str) -> dict:
                     process_status["youtube"]["progress"] = "Procesando video..."
 
             opts = {
-                'format': 'best[height>=720][ext=mp4]/best[height>=480][ext=mp4]/best[ext=mp4]/best',
+                'format': video_format,
                 'outtmpl': output_path,
                 'progress_hooks': [progress_hook],
-                'quiet': True, 'no_warnings': True,
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'socket_timeout': 300,
+                'retries': 5,
+                'fragment_retries': 5,
+                'merge_output_format': 'mp4',    # Forzar salida en mp4
+                'postprocessors': [{
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }],
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 duration = info.get('duration', 0)
-                log.append(f"[{now()}] {info.get('title', '?')} — {duration // 60}min")
+                title = info.get('title', '?')
+                height = info.get('height', '?')
+                log.append(f"[{now()}] {title}")
+                log.append(f"[{now()}] Duracion: {duration // 60}min {duration % 60}seg")
+                log.append(f"[{now()}] Resolucion: {height}p")
 
             size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.exists(output_path) else 0
-            process_status["youtube"]["progress"] = f"Completado — {size_mb:.0f} MB"
+            log.append(f"[{now()}] Archivo: {size_mb:.1f} MB")
+            process_status["youtube"]["progress"] = f"Completado — {size_mb:.0f} MB ({quality}p)"
             process_status["youtube"]["finished_at"] = now()
 
         except Exception as e:
@@ -64,6 +261,17 @@ def download_youtube(url: str, match_id: str) -> dict:
 
 def get_youtube_status() -> dict:
     return process_status.get("youtube", {"running": False, "progress": "", "log": []})
+
+
+def reset_process(process_key: str) -> dict:
+    """Resetea un proceso bloqueado a estado inicial."""
+    valid_keys = ["youtube", "extract", "zip"]
+    if process_key not in valid_keys:
+        return {"error": f"Proceso invalido. Opciones: {valid_keys}", "status": 400}
+    process_status[process_key] = {
+        "running": False, "progress": "", "log": [], "finished_at": None, "error": None
+    }
+    return {"message": f"Proceso '{process_key}' reseteado"}
 
 
 def save_uploaded_video(content: bytes, match_id: str) -> dict:
@@ -256,3 +464,14 @@ def get_zip_status() -> dict:
 def get_zip_path(filename: str) -> str | None:
     zip_path = os.path.join(DATA_DIR, filename)
     return zip_path if os.path.exists(zip_path) else None
+
+
+def delete_zip(path: str):
+    """Borra el ZIP despues de que el usuario lo descargo."""
+    import time
+    time.sleep(5)  # Esperar a que termine la descarga
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass

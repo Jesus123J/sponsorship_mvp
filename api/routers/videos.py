@@ -1,9 +1,16 @@
 """Rutas de videos, frames y ZIP."""
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from api.core.security import require_admin
+import os
+import hashlib
+import time
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request, BackgroundTasks
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from typing import Literal
+from api.core.security import require_admin, get_current_user
 from api.controllers import videos_controller as ctrl
+
+# Tokens temporales para streaming de video (expiran en 1 hora)
+_video_tokens: dict[str, dict] = {}
 
 router = APIRouter()
 
@@ -11,11 +18,12 @@ router = APIRouter()
 class YoutubeRequest(BaseModel):
     url: str
     match_id: str
+    quality: Literal["360", "480", "720", "1080"] = "1080"
 
 
 @router.post("/download-youtube")
 def download_youtube(req: YoutubeRequest, current_user: dict = Depends(require_admin)):
-    result = ctrl.download_youtube(req.url, req.match_id)
+    result = ctrl.download_youtube(req.url, req.match_id, req.quality)
     if "error" in result:
         raise HTTPException(status_code=result["status"], detail=result["error"])
     return result
@@ -24,6 +32,15 @@ def download_youtube(req: YoutubeRequest, current_user: dict = Depends(require_a
 @router.get("/download-youtube/status")
 def youtube_status(current_user: dict = Depends(require_admin)):
     return ctrl.get_youtube_status()
+
+
+@router.post("/reset-process/{process_key}")
+def reset_process(process_key: str, current_user: dict = Depends(require_admin)):
+    """Resetea un proceso bloqueado (youtube, extract, zip)."""
+    result = ctrl.reset_process(process_key)
+    if "error" in result:
+        raise HTTPException(status_code=result["status"], detail=result["error"])
+    return result
 
 
 @router.post("/upload-video")
@@ -36,17 +53,111 @@ async def upload_video(file: UploadFile = File(...), match_id: str = None, curre
     return ctrl.save_uploaded_video(content, match_id)
 
 
+class TrimVideoRequest(BaseModel):
+    source_match_id: str
+    output_match_id: str = Field(..., min_length=1, max_length=100)
+    start_seconds: float = Field(0, ge=0)
+    duration_seconds: float = Field(..., gt=0, le=3600)
+
+
+@router.post("/trim-video")
+def trim_video(req: TrimVideoRequest, current_user: dict = Depends(require_admin)):
+    result = ctrl.trim_video(req.source_match_id, req.output_match_id, req.start_seconds, req.duration_seconds)
+    if "error" in result:
+        raise HTTPException(status_code=result.get("status", 500), detail=result["error"])
+    return result
+
+
+@router.get("/trim-video/status")
+def trim_status(current_user: dict = Depends(require_admin)):
+    return ctrl.get_trim_status()
+
+
+@router.get("/video/{match_id}/info")
+def video_info(match_id: str, current_user: dict = Depends(require_admin)):
+    result = ctrl.get_video_info(match_id)
+    if "error" in result:
+        raise HTTPException(status_code=result.get("status", 500), detail=result["error"])
+    return result
+
+
 @router.get("/videos")
 def list_videos(current_user: dict = Depends(require_admin)):
     return ctrl.list_videos()
 
 
-@router.get("/video/{match_id}/stream")
-def stream_video(match_id: str, current_user: dict = Depends(require_admin)):
+@router.get("/video/{match_id}/token")
+def get_video_token(match_id: str, current_user: dict = Depends(require_admin)):
+    """Genera un token temporal (1 hora) para ver el video sin JWT."""
     path = ctrl.get_video_path(match_id)
     if not path:
         raise HTTPException(status_code=404, detail="Video no encontrado")
-    return FileResponse(path, media_type='video/mp4', filename=f'{match_id}.mp4')
+
+    token = hashlib.sha256(f"{match_id}{time.time()}".encode()).hexdigest()[:32]
+    _video_tokens[token] = {"match_id": match_id, "expires": time.time() + 3600}
+    return {"token": token, "url": f"/api/training/video/{match_id}/stream?token={token}"}
+
+
+@router.get("/video/{match_id}/stream")
+def stream_video(match_id: str, request: Request, token: str = None):
+    """Stream de video con soporte de Range requests para videos grandes.
+    Usa token temporal en vez de JWT (para que funcione con <video src>)."""
+
+    # Validar token temporal
+    if not token or token not in _video_tokens:
+        raise HTTPException(status_code=403, detail="Token de video requerido. Usa /video/{id}/token primero.")
+
+    token_data = _video_tokens[token]
+    if token_data["match_id"] != match_id:
+        raise HTTPException(status_code=403, detail="Token no valido para este video")
+    if token_data["expires"] < time.time():
+        del _video_tokens[token]
+        raise HTTPException(status_code=403, detail="Token expirado")
+
+    path = ctrl.get_video_path(match_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Video no encontrado")
+
+    file_size = os.path.getsize(path)
+    range_header = request.headers.get("range")
+
+    # Sin Range header → devolver archivo completo (para descargas)
+    if not range_header:
+        return FileResponse(path, media_type='video/mp4', filename=f'{match_id}.mp4')
+
+    # Con Range header → streaming parcial (para preview en navegador)
+    range_str = range_header.replace("bytes=", "")
+    parts = range_str.split("-")
+    start = int(parts[0])
+    end = int(parts[1]) if parts[1] else min(start + 5 * 1024 * 1024, file_size - 1)  # chunks de 5MB
+
+    if start >= file_size:
+        raise HTTPException(status_code=416, detail="Range no satisfactible")
+
+    chunk_size = end - start + 1
+
+    def file_iterator():
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = chunk_size
+            while remaining > 0:
+                read_size = min(remaining, 64 * 1024)  # leer en bloques de 64KB
+                data = f.read(read_size)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    return StreamingResponse(
+        file_iterator(),
+        status_code=206,
+        media_type="video/mp4",
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(chunk_size),
+        },
+    )
 
 
 @router.post("/extract-frames")
@@ -75,14 +186,41 @@ def prepare_zip(match_id: str, sample: int = 0, current_user: dict = Depends(req
     return result
 
 
+@router.get("/zip/status")
+def zip_status_global(current_user: dict = Depends(require_admin)):
+    """Estado del ZIP (sin match_id, para el monitor flotante)."""
+    return ctrl.get_zip_status()
+
+
 @router.get("/frames/{match_id}/prepare-zip/status")
 def zip_status(match_id: str, current_user: dict = Depends(require_admin)):
     return ctrl.get_zip_status()
 
 
-@router.get("/frames/{match_id}/download-ready")
-def download_ready(match_id: str, file: str, current_user: dict = Depends(require_admin)):
+@router.get("/frames/{match_id}/download-token")
+def get_download_token(match_id: str, file: str, current_user: dict = Depends(require_admin)):
+    """Genera token temporal para descargar ZIP sin JWT en header."""
     path = ctrl.get_zip_path(file)
     if not path:
         raise HTTPException(status_code=404, detail="ZIP no encontrado")
+    token = hashlib.sha256(f"zip-{file}-{time.time()}".encode()).hexdigest()[:32]
+    _video_tokens[token] = {"file": file, "expires": time.time() + 3600}
+    return {"token": token, "url": f"/api/training/frames/{match_id}/download-ready?file={file}&token={token}"}
+
+
+@router.get("/frames/{match_id}/download-ready")
+def download_ready(match_id: str, file: str, background_tasks: BackgroundTasks, token: str = None):
+    """Descarga ZIP con token temporal (no necesita JWT)."""
+    if not token or token not in _video_tokens:
+        raise HTTPException(status_code=403, detail="Token requerido")
+    token_data = _video_tokens[token]
+    if token_data.get("file") != file or token_data["expires"] < time.time():
+        raise HTTPException(status_code=403, detail="Token invalido o expirado")
+
+    path = ctrl.get_zip_path(file)
+    if not path:
+        raise HTTPException(status_code=404, detail="ZIP no encontrado")
+
+    del _video_tokens[token]
+    background_tasks.add_task(ctrl.delete_zip, path)
     return FileResponse(path, media_type='application/zip', filename=file)

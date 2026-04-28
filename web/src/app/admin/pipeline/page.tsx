@@ -1,10 +1,22 @@
 'use client'
 import { useEffect, useState, useRef } from 'react'
+import { getToken } from '@/lib/auth'
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'
 
+// Fetch con JWT token incluido
+function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = getToken()
+  const headers: any = { ...options.headers }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return fetch(url, { ...options, headers })
+}
+
 export default function PipelinePage() {
-  const [activeStep, setActiveStep] = useState<'video' | 'frames' | 'dataset' | 'train' | 'run'>('video')
+  const [activeStep, setActiveStep] = useState<'video' | 'frames' | 'prepare' | 'dataset' | 'train' | 'run'>('video')
+  const [preparingZip, setPreparingZip] = useState(false)
+  const [prepareResult, setPrepareResult] = useState<any>(null)
+  const [preparedBlob, setPreparedBlob] = useState<Blob | null>(null)
   const [modelInfo, setModelInfo] = useState<any>(null)
   const [videos, setVideos] = useState<any[]>([])
   const [trainingStatus, setTrainingStatus] = useState<any>(null)
@@ -19,46 +31,156 @@ export default function PipelinePage() {
   const [ytStatus, setYtStatus] = useState<any>(null)
   const [extractStatus, setExtractStatus] = useState<any>(null)
   const [zipStatus, setZipStatus] = useState<any>(null)
+  const [existingFrames, setExistingFrames] = useState<any>(null)
   const [previewVideo, setPreviewVideo] = useState<string | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [labelGuide, setLabelGuide] = useState<any>(null)
   const [showGuide, setShowGuide] = useState(false)
   const pollRef = useRef<any>(null)
+  const visibilityHandlerRef = useRef<any>(null)
 
   useEffect(() => {
     loadModelInfo()
     loadVideos()
     loadMatches()
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    loadR2Videos()
+    // Detecta entrenamiento o pipeline ya corriendo y re-conecta polling
+    authFetch(`${API}/training/train/status`).then(r => r.json()).then(s => {
+      if (s?.running) {
+        setTrainingStatus({ ...s, _startedAt: Date.now() - (s._elapsedMs || 0) })
+        setActiveStep('train')
+        startPoll(`${API}/training/train/status`, (ss) => {
+          setTrainingStatus((prev: any) => ({ ...prev, ...ss }))
+          if (!ss.running && !ss.error) loadModelInfo()
+        })
+      }
+    }).catch(() => {})
+    authFetch(`${API}/training/pipeline/status`).then(r => r.json()).then(s => {
+      if (s?.running) {
+        setPipelineStatus(s)
+        setActiveStep('run')
+        startPoll(`${API}/training/pipeline/status`, (ss) => {
+          setPipelineStatus((prev: any) => ({ ...prev, ...ss }))
+        })
+      }
+    }).catch(() => {})
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+      if (visibilityHandlerRef.current) {
+        document.removeEventListener('visibilitychange', visibilityHandlerRef.current)
+        visibilityHandlerRef.current = null
+      }
+    }
   }, [])
 
-  const loadModelInfo = () => fetch(`${API}/training/model/info`).then(r => r.json()).then(setModelInfo).catch(() => {})
-  const loadVideos = () => fetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
-  const loadMatches = () => fetch(`${API}/matches/`).then(r => r.json()).then(setMatches).catch(() => {})
-  const loadLabelGuide = () => fetch(`${API}/settings/labeling-guide`).then(r => r.json()).then(setLabelGuide).catch(() => {})
+  const loadModelInfo = () => authFetch(`${API}/training/model/info`).then(r => r.json()).then(setModelInfo).catch(() => {})
+  const [r2Videos, setR2Videos] = useState<any[]>([])
+  const [r2Configured, setR2Configured] = useState(false)
+  const [importingR2, setImportingR2] = useState<string>('')
+  const loadR2Videos = () => {
+    authFetch(`${API}/storage/status`).then(r => r.ok ? r.json() : null).then(s => {
+      if (s?.configured && !s.error) {
+        setR2Configured(true)
+        authFetch(`${API}/storage/videos`).then(r => r.ok ? r.json() : []).then(setR2Videos).catch(() => {})
+      } else {
+        setR2Configured(false)
+      }
+    }).catch(() => setR2Configured(false))
+  }
+  const importFromR2 = async (remoteKey: string) => {
+    const filename = remoteKey.split('/').pop() || remoteKey
+    const defaultId = filename.replace(/\.mp4$/i, '').replace(/[^a-z0-9_-]/gi, '_').toLowerCase()
+    const matchId = prompt(`match_id para guardar localmente:`, defaultId)
+    if (!matchId) return
+    setImportingR2(remoteKey)
+    try {
+      const res = await authFetch(`${API}/storage/import-video`, {
+        method: 'POST',
+        body: JSON.stringify({ remote_key: remoteKey, match_id: matchId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail)
+      // Polling del task para mostrar progreso
+      const taskId = data.task_id
+      const poll = setInterval(async () => {
+        try {
+          const tr = await authFetch(`${API}/storage/tasks/${taskId}`).then(r => r.json())
+          if (!tr.running) {
+            clearInterval(poll)
+            setImportingR2('')
+            if (tr.error) alert(`❌ ${tr.error}`)
+            else loadVideos()
+          }
+        } catch {}
+      }, 1500)
+    } catch (e: any) { alert(e.message); setImportingR2('') }
+  }
+  const loadVideos = () => authFetch(`${API}/training/videos`).then(r => r.json()).then(list => {
+    setVideos(list)
+    // Cargar frames existentes de cada video
+    if (Array.isArray(list)) {
+      list.forEach((v: any) => {
+        authFetch(`${API}/training/frames/${v.match_id}?page=1&per_page=1`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.total > 0) {
+              setExistingFrames((prev: any) => ({ ...prev, [v.match_id]: data.total }))
+            }
+          })
+          .catch(() => {})
+      })
+    }
+  }).catch(() => {})
+  const loadMatches = () => authFetch(`${API}/matches/`).then(r => r.json()).then(setMatches).catch(() => {})
+  const loadLabelGuide = () => authFetch(`${API}/settings/labeling-guide`).then(r => r.json()).then(setLabelGuide).catch(() => {})
 
   const startPoll = (url: string, setter: (s: any) => void, onDone?: () => void) => {
     if (pollRef.current) clearInterval(pollRef.current)
-    pollRef.current = setInterval(async () => {
+    if (visibilityHandlerRef.current) {
+      document.removeEventListener('visibilitychange', visibilityHandlerRef.current)
+    }
+
+    const doPoll = async () => {
       try {
-        const s = await fetch(url).then(r => r.json())
+        const s = await authFetch(url).then(r => r.json())
         setter(s)
-        if (!s.running) { clearInterval(pollRef.current); onDone?.() }
+        if (!s.running) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+          if (visibilityHandlerRef.current) {
+            document.removeEventListener('visibilitychange', visibilityHandlerRef.current)
+            visibilityHandlerRef.current = null
+          }
+          onDone?.()
+        }
       } catch {}
-    }, 1500)
+    }
+
+    doPoll() // Poll inmediato
+    pollRef.current = setInterval(doPoll, 2000)
+
+    // Re-poll al volver a la pestaña (sin fugas de listeners)
+    const onVisible = () => { if (!document.hidden && pollRef.current) doPoll() }
+    visibilityHandlerRef.current = onVisible
+    document.addEventListener('visibilitychange', onVisible)
   }
 
   // ==================== YOUTUBE ====================
   const downloadYoutube = async () => {
     if (!ytUrl || !ytMatchId) return alert('Pon el link de YouTube y un match_id')
     try {
-      const res = await fetch(`${API}/training/download-youtube`, {
+      const res = await authFetch(`${API}/training/download-youtube`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: ytUrl, match_id: ytMatchId }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
-      startPoll(`${API}/training/download-youtube/status`, setYtStatus, loadVideos)
-    } catch (err: any) { setYtStatus({ error: err.message }) }
+      setYtStatus({ running: true, progress: 'Conectando con YouTube...', match_id: ytMatchId })
+      startPoll(`${API}/training/download-youtube/status`, (s) => {
+        setYtStatus((prev: any) => ({ ...prev, ...s }))
+        if (!s.running && !s.error) loadVideos()
+      })
+    } catch (err: any) { setYtStatus({ running: false, error: err.message, match_id: ytMatchId }) }
   }
 
   // ==================== UPLOAD VIDEO ====================
@@ -70,7 +192,7 @@ export default function PipelinePage() {
     form.append('file', file)
     if (selectedMatch) form.append('match_id', selectedMatch)
     try {
-      const res = await fetch(`${API}/training/upload-video`, { method: 'POST', body: form })
+      const res = await authFetch(`${API}/training/upload-video`, { method: 'POST', body: form })
       if (!res.ok) throw new Error((await res.json()).detail)
       loadVideos()
     } catch (err: any) { alert(err.message) }
@@ -79,23 +201,150 @@ export default function PipelinePage() {
 
   // ==================== EXTRACT FRAMES ====================
   const extractFrames = async (matchId: string) => {
-    setExtractStatus({ running: true, progress: 'Iniciando...', percent: 0, log: [] })
+    setExtractStatus({ running: true, progress: 'Iniciando extraccion...', percent: 0, match_id: matchId })
     try {
-      const res = await fetch(`${API}/training/extract-frames?match_id=${matchId}`, { method: 'POST' })
+      const res = await authFetch(`${API}/training/extract-frames?match_id=${matchId}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
       setActiveStep('frames')
-      startPoll(`${API}/training/extract-frames/status`, setExtractStatus)
-    } catch (err: any) { setExtractStatus({ error: err.message }) }
+      startPoll(`${API}/training/extract-frames/status`, (s) => {
+        setExtractStatus((prev: any) => ({ ...prev, ...s, match_id: matchId }))
+      })
+    } catch (err: any) { setExtractStatus({ running: false, error: err.message, match_id: matchId }) }
   }
 
   // ==================== PREPARE ZIP ====================
   const prepareZip = async (matchId: string, sample: number) => {
-    setZipStatus({ running: true, progress: 'Preparando...', percent: 0, log: [] })
+    if (!matchId) return
+    setZipStatus({ running: true, progress: `Preparando ZIP (${sample > 0 ? sample + ' frames' : 'todos'})...`, percent: 0, match_id: matchId })
     try {
-      const res = await fetch(`${API}/training/frames/${matchId}/prepare-zip?sample=${sample}`, { method: 'POST' })
+      const res = await authFetch(`${API}/training/frames/${matchId}/prepare-zip?sample=${sample}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
-      startPoll(`${API}/training/frames/${matchId}/prepare-zip/status`, setZipStatus)
-    } catch (err: any) { setZipStatus({ error: err.message }) }
+      startPoll(`${API}/training/frames/${matchId}/prepare-zip/status`, (s) => {
+        // Mantener match_id y nunca setear null
+        setZipStatus((prev: any) => ({ ...prev, ...s, match_id: matchId }))
+      })
+    } catch (err: any) { setZipStatus({ running: false, error: err.message, match_id: matchId }) }
+  }
+
+  // ==================== PREPARE ZIP (fix Label Studio export) ====================
+  const handlePrepareZip = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setPreparingZip(true); setPrepareResult(null); setPreparedBlob(null)
+
+    try {
+      const JSZip = (await import('jszip')).default
+      const zip = await JSZip.loadAsync(file)
+
+      let classesContent: string | null = null
+      let classesPath = ''
+      let yamlExists = false
+      let imagesCount = 0
+      let labelsCount = 0
+
+      for (const path in zip.files) {
+        const f = zip.files[path]
+        if (f.dir) continue
+        const lower = path.toLowerCase()
+        if (lower.endsWith('classes.txt')) {
+          classesContent = await f.async('text')
+          classesPath = path
+        }
+        if (lower.endsWith('.yaml') || lower.endsWith('.yml')) yamlExists = true
+        if (lower.match(/\.(jpg|jpeg|png)$/)) imagesCount++
+        if (lower.endsWith('.txt') && !lower.endsWith('classes.txt') && !lower.endsWith('notes.json')) labelsCount++
+      }
+
+      if (yamlExists) {
+        const blob = await zip.generateAsync({ type: 'blob' })
+        setPreparedBlob(blob)
+        setPrepareResult({
+          alreadyReady: true,
+          images: imagesCount,
+          labels: labelsCount,
+          filename: file.name,
+        })
+        setPreparingZip(false)
+        return
+      }
+
+      if (!classesContent) {
+        setPrepareResult({
+          error: 'No se encontro classes.txt en el ZIP. Exporta como "YOLO with Images" (sin OBB) en Label Studio.',
+        })
+        setPreparingZip(false)
+        return
+      }
+
+      // Limpia comas finales, espacios y lowercase (sponsor_id siempre es snake_case en la BD)
+      const rawClasses = classesContent.split('\n').map(l => l.trim()).filter(Boolean)
+      const classes = rawClasses.map(c =>
+        c.replace(/,+$/, '')   // coma(s) al final
+         .replace(/\s+/g, '_')  // espacios -> underscore
+         .toLowerCase()
+         .trim()
+      )
+      const cleanedCount = classes.filter((c, i) => c !== rawClasses[i]).length
+
+      // Reescribe classes.txt con los nombres limpios
+      zip.file(classesPath, classes.join('\n') + '\n')
+
+      const yamlLines = [
+        'path: .',
+        'train: images',
+        'val: images',
+        `nc: ${classes.length}`,
+        'names:',
+        ...classes.map((c, i) => `  ${i}: ${c}`),
+      ]
+      const yamlContent = yamlLines.join('\n') + '\n'
+
+      const rootDir = classesPath.includes('/') ? classesPath.substring(0, classesPath.lastIndexOf('/') + 1) : ''
+      zip.file(`${rootDir}data.yaml`, yamlContent)
+
+      const blob = await zip.generateAsync({ type: 'blob' })
+      const filename = file.name.replace(/\.zip$/i, '') + '_con_yaml.zip'
+
+      setPreparedBlob(blob)
+      setPrepareResult({
+        success: true,
+        classes,
+        rawClasses,
+        cleanedCount,
+        images: imagesCount,
+        labels: labelsCount,
+        yamlPreview: yamlContent,
+        filename,
+      })
+    } catch (err: any) {
+      setPrepareResult({ error: err.message || 'Error al procesar el ZIP' })
+    }
+    setPreparingZip(false)
+  }
+
+  const downloadPreparedZip = () => {
+    if (!preparedBlob || !prepareResult?.filename) return
+    const url = URL.createObjectURL(preparedBlob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = prepareResult.filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const uploadPreparedZip = async () => {
+    if (!preparedBlob || !prepareResult?.filename) return
+    setUploading(true); setUploadResult(null)
+    const form = new FormData()
+    form.append('file', preparedBlob, prepareResult.filename)
+    try {
+      const res = await authFetch(`${API}/training/upload-dataset`, { method: 'POST', body: form })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail)
+      setUploadResult(data)
+      setActiveStep('dataset')
+    } catch (err: any) { setUploadResult({ error: err.message }) }
+    setUploading(false)
   }
 
   // ==================== UPLOAD DATASET ====================
@@ -106,7 +355,7 @@ export default function PipelinePage() {
     const form = new FormData()
     form.append('file', file)
     try {
-      const res = await fetch(`${API}/training/upload-dataset`, { method: 'POST', body: form })
+      const res = await authFetch(`${API}/training/upload-dataset`, { method: 'POST', body: form })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail)
       setUploadResult(data)
@@ -116,36 +365,56 @@ export default function PipelinePage() {
 
   // ==================== TRAIN ====================
   const startTraining = async () => {
+    setTrainingStatus({ running: true, progress: 'Iniciando entrenamiento...' })
     try {
-      const res = await fetch(`${API}/training/train?epochs=${trainConfig.epochs}&imgsz=${trainConfig.imgsz}&batch=${trainConfig.batch}`, { method: 'POST' })
+      const res = await authFetch(`${API}/training/train?epochs=${trainConfig.epochs}&imgsz=${trainConfig.imgsz}&batch=${trainConfig.batch}`, { method: 'POST' })
       if (!res.ok) throw new Error((await res.json()).detail)
-      startPoll(`${API}/training/train/status`, setTrainingStatus, loadModelInfo)
-    } catch (err: any) { setTrainingStatus({ error: err.message }) }
+      startPoll(`${API}/training/train/status`, (s) => {
+        setTrainingStatus((prev: any) => ({ ...prev, ...s }))
+        if (!s.running && !s.error) loadModelInfo()
+      })
+    } catch (err: any) { setTrainingStatus({ running: false, error: err.message }) }
   }
 
   // ==================== RUN PIPELINE ====================
   const runPipeline = async (matchId: string) => {
+    setPipelineStatus({ running: true, progress: 'Iniciando pipeline...', match_id: matchId })
     try {
-      const res = await fetch(`${API}/training/run`, {
+      const res = await authFetch(`${API}/training/run`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ match_id: matchId }),
       })
       if (!res.ok) throw new Error((await res.json()).detail)
       setActiveStep('run')
-      startPoll(`${API}/training/pipeline/status`, setPipelineStatus)
-    } catch (err: any) { setPipelineStatus({ error: err.message }) }
+      startPoll(`${API}/training/pipeline/status`, (s) => {
+        setPipelineStatus((prev: any) => ({ ...prev, ...s, match_id: matchId }))
+      })
+    } catch (err: any) { setPipelineStatus({ running: false, error: err.message, match_id: matchId }) }
   }
 
   const steps = [
     { key: 'video' as const, num: '1', title: 'Obtener Video', desc: 'YouTube o MP4' },
     { key: 'frames' as const, num: '2', title: 'Frames', desc: 'Extraer y descargar' },
-    { key: 'dataset' as const, num: '3', title: 'Dataset', desc: 'Subir etiquetado' },
-    { key: 'train' as const, num: '4', title: 'Entrenar', desc: 'Generar best.pt' },
-    { key: 'run' as const, num: '5', title: 'Ejecutar', desc: 'Analizar partido' },
+    { key: 'prepare' as const, num: '3', title: 'Preparar ZIP', desc: 'Generar data.yaml' },
+    { key: 'dataset' as const, num: '4', title: 'Dataset', desc: 'Subir al servidor' },
+    { key: 'train' as const, num: '5', title: 'Entrenar', desc: 'Generar best.pt' },
+    { key: 'run' as const, num: '6', title: 'Ejecutar', desc: 'Analizar partido' },
   ]
 
   return (
+
     <div>
+      <style jsx global>{`
+        @keyframes indeterminate {
+          0% { left: -35%; width: 35%; }
+          50% { left: 35%; width: 45%; }
+          100% { left: 100%; width: 35%; }
+        }
+        @keyframes shimmer {
+          0% { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+      `}</style>
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900">Pipeline de Analisis</h1>
         <p className="text-gray-500 mt-1">Sube video, extrae frames, etiqueta, entrena y analiza</p>
@@ -213,7 +482,41 @@ export default function PipelinePage() {
           </div>
 
           <div className="flex items-center gap-3 mb-6">
-            <div className="flex-1 h-px bg-gray-200" /><span className="text-xs text-gray-400">o sube archivo</span><div className="flex-1 h-px bg-gray-200" />
+            <div className="flex-1 h-px bg-gray-200" /><span className="text-xs text-gray-400">o</span><div className="flex-1 h-px bg-gray-200" />
+          </div>
+
+          {/* Importar desde Cloudflare R2 */}
+          {r2Configured && (
+            <div className="bg-purple-50 border border-purple-200 rounded-xl p-5 mb-6">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                <span className="text-lg">☁</span> Importar desde Cloudflare R2
+              </h3>
+              {r2Videos.length === 0 ? (
+                <p className="text-xs text-gray-500">
+                  No hay videos en R2. Sube primero a tu bucket o usa{' '}
+                  <a href="/admin/storage" className="text-indigo-600 underline">/admin/storage</a>
+                </p>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {r2Videos.map((v: any) => (
+                    <div key={v.key} className="flex items-center justify-between bg-white rounded-lg p-2 border border-purple-100">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-gray-900 truncate">🎬 {v.key}</p>
+                        <p className="text-[10px] text-gray-500">{v.size_mb} MB</p>
+                      </div>
+                      <button onClick={() => importFromR2(v.key)} disabled={importingR2 === v.key}
+                        className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-semibold hover:bg-purple-700 disabled:opacity-50 ml-2 flex-shrink-0">
+                        {importingR2 === v.key ? '⏳ Importando...' : '⬇ Importar'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center gap-3 mb-6">
+            <div className="flex-1 h-px bg-gray-200" /><span className="text-xs text-gray-400">o sube archivo desde tu PC</span><div className="flex-1 h-px bg-gray-200" />
           </div>
 
           <label className={`block border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors ${
@@ -231,10 +534,29 @@ export default function PipelinePage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-900">{v.match_id}</p>
-                      <p className="text-xs text-gray-400">{v.size_mb} MB</p>
+                      <p className="text-xs text-gray-400">
+                        {v.size_mb} MB
+                        {existingFrames?.[v.match_id] && (
+                          <span className="ml-2 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full font-medium">
+                            {existingFrames[v.match_id].toLocaleString()} frames
+                          </span>
+                        )}
+                      </p>
                     </div>
                     <div className="flex gap-2">
-                      <button onClick={() => setPreviewVideo(previewVideo === v.match_id ? null : v.match_id)}
+                      <button onClick={async () => {
+                          if (previewVideo === v.match_id) {
+                            setPreviewVideo(null)
+                            setVideoUrl(null)
+                          } else {
+                            try {
+                              const res = await authFetch(`${API}/training/video/${v.match_id}/token`)
+                              const data = await res.json()
+                              setVideoUrl(`${API}/training/video/${v.match_id}/stream?token=${data.token}`)
+                              setPreviewVideo(v.match_id)
+                            } catch { alert('Error al cargar video') }
+                          }
+                        }}
                         className={`px-3 py-2 rounded-xl text-sm font-medium transition-all ${
                           previewVideo === v.match_id
                             ? 'bg-slate-800 text-white'
@@ -250,10 +572,10 @@ export default function PipelinePage() {
                   </div>
 
                   {/* Video player */}
-                  {previewVideo === v.match_id && (
+                  {previewVideo === v.match_id && videoUrl && (
                     <div className="mt-4 rounded-xl overflow-hidden bg-black">
                       <video
-                        src={`${API}/training/video/${v.match_id}/stream`}
+                        src={videoUrl}
                         controls
                         className="w-full max-h-[400px]"
                         preload="metadata"
@@ -314,14 +636,24 @@ export default function PipelinePage() {
               {zipStatus && (
                 <div className="mb-6">
                   <ProgressCard status={zipStatus} showBar />
-                  {zipStatus.download_url && !zipStatus.running && (
-                    <a href={`${API}${zipStatus.download_url.replace('/api', '')}`} download
+                  {zipStatus.download_url && !zipStatus.running && !zipStatus.error && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const file = zipStatus.download_url.split('file=')[1] || ''
+                          const matchId = zipStatus.match_id || extractStatus?.match_id || ''
+                          const res = await authFetch(`${API}/training/frames/${matchId}/download-token?file=${file}`)
+                          if (!res.ok) throw new Error('Error al generar token')
+                          const data = await res.json()
+                          window.open(`${API}${data.url.replace('/api', '')}`, '_blank')
+                        } catch (err: any) { alert(err.message) }
+                      }}
                       className="inline-flex items-center gap-2 mt-3 px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 transition-colors">
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
                       </svg>
                       Descargar ZIP
-                    </a>
+                    </button>
                   )}
                 </div>
               )}
@@ -334,8 +666,8 @@ export default function PipelinePage() {
                   <li><span className="text-indigo-400 font-bold">2.</span> Abre Label Studio: <code className="text-xs bg-white/10 px-1.5 py-0.5 rounded">label-studio start</code></li>
                   <li><span className="text-indigo-400 font-bold">3.</span> Crea proyecto, importa las imagenes del ZIP</li>
                   <li><span className="text-indigo-400 font-bold">4.</span> Etiqueta cada logo con el <strong className="text-amber-400">nombre exacto</strong> de la tabla de abajo</li>
-                  <li><span className="text-indigo-400 font-bold">5.</span> Exporta como <strong className="text-white">YOLOv8 OBB con imagenes</strong> (.zip)</li>
-                  <li><span className="text-indigo-400 font-bold">6.</span> Sube ese ZIP en el paso 3</li>
+                  <li><span className="text-indigo-400 font-bold">5.</span> Exporta como <strong className="text-white">YOLO with Images</strong> (.zip) — <span className="text-red-400">NO uses OBB</span></li>
+                  <li><span className="text-indigo-400 font-bold">6.</span> Sube ese ZIP en el paso 3 (Preparar ZIP) para generar el data.yaml</li>
                 </ol>
               </div>
 
@@ -405,26 +737,192 @@ export default function PipelinePage() {
                 )}
               </div>
 
-              <button onClick={() => setActiveStep('dataset')}
+              <button onClick={() => setActiveStep('prepare')}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700">
                 Ya etiquete, ir al paso 3
               </button>
             </>
           )}
 
+          {/* Mostrar frames existentes si no hay extraccion reciente */}
           {!extractStatus && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 text-center">
-              <p className="text-sm text-amber-800">Primero sube un video y dale &quot;Extraer frames&quot; en el paso 1.</p>
+            <div>
+              {existingFrames && Object.keys(existingFrames).length > 0 ? (
+                <div className="space-y-4">
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5">
+                    <p className="text-sm font-medium text-emerald-800 mb-3">Frames ya extraidos</p>
+                    <div className="space-y-2">
+                      {Object.entries(existingFrames).map(([matchId, count]: [string, any]) => (
+                        <div key={matchId} className="flex items-center justify-between bg-white rounded-lg px-4 py-3 border border-emerald-100">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900">{matchId}</p>
+                            <p className="text-xs text-gray-400">{count.toLocaleString()} frames disponibles</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <button onClick={() => {
+                              setExtractStatus({ finished_at: true, frames: count, duracion_seg: 0, fps_video: 0, match_id: matchId })
+                              setSelectedMatch(matchId)
+                            }}
+                              className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-700">
+                              Usar estos frames
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-400 text-center">O ve al paso 1 para extraer frames de otro video</p>
+                </div>
+              ) : (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 text-center">
+                  <p className="text-sm text-amber-800">Primero sube un video y dale &quot;Extraer frames&quot; en el paso 1.</p>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* ==================== PASO 3: DATASET ==================== */}
+      {/* ==================== PASO 3: PREPARE ZIP ==================== */}
+      {activeStep === 'prepare' && (
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-1">3. Preparar ZIP (generar data.yaml)</h2>
+          <p className="text-sm text-gray-500 mb-6">
+            Label Studio exporta el ZIP sin <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">data.yaml</code>.
+            Sube el ZIP aqui y el sistema lo genera automaticamente a partir de <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">classes.txt</code>.
+          </p>
+
+          {/* Info banner */}
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <svg className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+              </svg>
+              <div>
+                <p className="text-sm font-medium text-blue-900 mb-1">Como exportar desde Label Studio</p>
+                <p className="text-xs text-blue-800">
+                  Usa <strong>&quot;YOLO with Images&quot;</strong> (NO &quot;YOLOv8 OBB&quot;). El export viene con <code className="bg-white/60 px-1 rounded">images/</code>,
+                  {' '}<code className="bg-white/60 px-1 rounded">labels/</code>, <code className="bg-white/60 px-1 rounded">classes.txt</code>, <code className="bg-white/60 px-1 rounded">notes.json</code> — pero sin el <code className="bg-white/60 px-1 rounded">data.yaml</code> que YOLO necesita.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <label className={`block border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-colors ${
+            preparingZip ? 'border-gray-200 bg-gray-50' : 'border-amber-200 hover:border-amber-400 hover:bg-amber-50'
+          }`}>
+            <input type="file" accept=".zip" onChange={handlePrepareZip} className="hidden" disabled={preparingZip} />
+            <p className="text-3xl mb-2">{preparingZip ? '\u23F3' : '\u{1F527}'}</p>
+            <p className="text-sm font-medium text-gray-700">
+              {preparingZip ? 'Procesando ZIP...' : 'Click para subir ZIP de Label Studio'}
+            </p>
+            <p className="text-xs text-gray-400 mt-1">Genera el data.yaml automaticamente</p>
+          </label>
+
+          {/* Result: already has yaml */}
+          {prepareResult?.alreadyReady && (
+            <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                </svg>
+                <p className="text-sm font-semibold text-emerald-800">El ZIP ya tiene data.yaml</p>
+              </div>
+              <p className="text-xs text-emerald-700 mb-3">
+                {prepareResult.images} imagenes, {prepareResult.labels} labels. Puedes subirlo directo al servidor.
+              </p>
+              <button onClick={uploadPreparedZip} disabled={uploading}
+                className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50">
+                {uploading ? 'Subiendo...' : 'Subir al servidor y continuar'}
+              </button>
+            </div>
+          )}
+
+          {/* Result: success with generated yaml */}
+          {prepareResult?.success && (
+            <div className="mt-4 space-y-4">
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                  </svg>
+                  <p className="text-sm font-semibold text-emerald-800">ZIP preparado</p>
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div><p className="text-xs text-gray-500">Imagenes</p><p className="text-lg font-bold text-gray-900">{prepareResult.images}</p></div>
+                  <div><p className="text-xs text-gray-500">Labels</p><p className="text-lg font-bold text-gray-900">{prepareResult.labels}</p></div>
+                  <div><p className="text-xs text-gray-500">Clases</p><p className="text-lg font-bold text-gray-900">{prepareResult.classes.length}</p></div>
+                </div>
+              </div>
+
+              {/* Classes found */}
+              <div className="bg-white border border-gray-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-semibold text-gray-900">Clases detectadas ({prepareResult.classes.length})</p>
+                  {prepareResult.cleanedCount > 0 && (
+                    <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-xs font-medium">
+                      {prepareResult.cleanedCount} limpiada{prepareResult.cleanedCount !== 1 ? 's' : ''} (quitamos comas/espacios)
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {prepareResult.classes.map((c: string, i: number) => {
+                    const wasCleaned = prepareResult.rawClasses?.[i] !== c
+                    return (
+                      <span key={i}
+                        title={wasCleaned ? `Original: "${prepareResult.rawClasses[i]}"` : undefined}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-medium ${
+                          wasCleaned ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'
+                        }`}>
+                        <span className={`mr-1 ${wasCleaned ? 'text-amber-400' : 'text-indigo-400'}`}>{i}:</span>{c}
+                      </span>
+                    )
+                  })}
+                </div>
+                {prepareResult.cleanedCount > 0 && (
+                  <p className="text-xs text-gray-500 mt-2">
+                    Las etiquetas en amarillo tenian comas/espacios/mayusculas que se limpiaron para que coincidan con los sponsor_id de la BD.
+                  </p>
+                )}
+              </div>
+
+              {/* YAML preview */}
+              <div className="bg-slate-900 rounded-xl p-4">
+                <p className="text-xs font-semibold text-slate-300 mb-2">data.yaml generado</p>
+                <pre className="text-xs font-mono text-slate-200 whitespace-pre-wrap overflow-x-auto">{prepareResult.yamlPreview}</pre>
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-wrap gap-3">
+                <button onClick={uploadPreparedZip} disabled={uploading}
+                  className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50">
+                  {uploading ? 'Subiendo...' : 'Subir al servidor y continuar'}
+                </button>
+                <button onClick={downloadPreparedZip}
+                  className="px-5 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50">
+                  Descargar ZIP arreglado
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Error */}
+          {prepareResult?.error && (
+            <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-4">
+              <p className="text-sm text-red-700">{prepareResult.error}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ==================== PASO 4: DATASET ==================== */}
       {activeStep === 'dataset' && (
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-1">3. Subir dataset etiquetado</h2>
-          <p className="text-sm text-gray-500 mb-6">Sube el ZIP exportado de Label Studio.</p>
+          <h2 className="font-semibold text-gray-900 mb-1">4. Subir dataset al servidor</h2>
+          <p className="text-sm text-gray-500 mb-6">
+            Si ya usaste el paso 3 (&quot;Subir al servidor y continuar&quot;) el dataset ya esta subido.
+            Si no, sube aqui el ZIP (ya con data.yaml).
+          </p>
 
           <label className={`block border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-colors ${
             uploading ? 'border-gray-200 bg-gray-50' : 'border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50'
@@ -432,7 +930,7 @@ export default function PipelinePage() {
             <input type="file" accept=".zip" onChange={handleDatasetUpload} className="hidden" disabled={uploading} />
             <p className="text-3xl mb-2">{uploading ? '\u23F3' : '\u{1F4E6}'}</p>
             <p className="text-sm font-medium text-gray-700">{uploading ? 'Subiendo...' : 'Click para seleccionar ZIP'}</p>
-            <p className="text-xs text-gray-400 mt-1">Export de Label Studio: YOLOv8 OBB (.zip)</p>
+            <p className="text-xs text-gray-400 mt-1">ZIP con data.yaml (generado en el paso 3)</p>
           </label>
 
           {uploadResult && !uploadResult.error && (
@@ -495,17 +993,17 @@ export default function PipelinePage() {
         </div>
       )}
 
-      {/* ==================== PASO 4: TRAIN ==================== */}
+      {/* ==================== PASO 5: TRAIN ==================== */}
       {activeStep === 'train' && <TrainStep
         trainConfig={trainConfig} setTrainConfig={setTrainConfig}
         trainingStatus={trainingStatus} startTraining={startTraining}
         setActiveStep={setActiveStep}
       />}
 
-      {/* ==================== PASO 5: RUN ==================== */}
+      {/* ==================== PASO 6: RUN ==================== */}
       {activeStep === 'run' && (
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-1">5. Ejecutar pipeline</h2>
+          <h2 className="font-semibold text-gray-900 mb-1">6. Ejecutar pipeline</h2>
           <p className="text-sm text-gray-500 mb-6">Analiza el video con el modelo entrenado.</p>
 
           {!pipelineStatus?.running && (
@@ -551,7 +1049,9 @@ function TrainStep({ trainConfig, setTrainConfig, trainingStatus, startTraining,
   const [showHistory, setShowHistory] = useState(false)
 
   useEffect(() => {
-    fetch(`${API_URL}/training/model/history`).then(r => r.json()).then(setHistory).catch(() => {})
+    const token = getToken()
+    const headers: any = token ? { 'Authorization': `Bearer ${token}` } : {}
+    fetch(`${API_URL}/training/model/history`, { headers }).then(r => r.json()).then(setHistory).catch(() => {})
   }, [trainingStatus?.finished_at])
 
   const metrics = trainingStatus?.metrics
@@ -559,7 +1059,7 @@ function TrainStep({ trainConfig, setTrainConfig, trainingStatus, startTraining,
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-      <h2 className="font-semibold text-gray-900 mb-1">4. Entrenar modelo YOLO</h2>
+      <h2 className="font-semibold text-gray-900 mb-1">5. Entrenar modelo YOLO</h2>
       <p className="text-sm text-gray-500 mb-6">Configura y entrena. Ves las metricas en tiempo real.</p>
 
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -719,9 +1219,10 @@ function NewLabelRow({ label }: { label: string }) {
   const save = async () => {
     setStatus('saving')
     try {
+      const token = getToken()
       const res = await fetch(`${API_URL}/sponsors/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
         body: JSON.stringify({ sponsor_id: label, nombre, categoria, tier_mvp: 3 }),
       })
       if (!res.ok) throw new Error((await res.json()).detail)
@@ -772,6 +1273,37 @@ function ProgressCard({ status, showBar }: { status: any; showBar?: boolean }) {
   const isRunning = status.running
   const isDone = status.finished_at && !status.error
   const isError = !!status.error
+  const percent = typeof status.percent === 'number' ? status.percent : null
+  const hasDetPercent = percent !== null && percent > 0
+  const logRef = useRef<HTMLDivElement>(null)
+  const [elapsed, setElapsed] = useState(0)
+  const startedRef = useRef<number | null>(null)
+
+  // Contador de tiempo transcurrido
+  useEffect(() => {
+    if (isRunning && startedRef.current === null) {
+      startedRef.current = Date.now()
+    }
+    if (!isRunning) {
+      startedRef.current = null
+      return
+    }
+    const t = setInterval(() => {
+      if (startedRef.current) setElapsed(Math.floor((Date.now() - startedRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [isRunning])
+
+  // Auto-scroll log al final
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [status.log?.length])
+
+  const formatElapsed = (s: number) => {
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  }
 
   return (
     <div>
@@ -781,8 +1313,8 @@ function ProgressCard({ status, showBar }: { status: any; showBar?: boolean }) {
         isRunning ? 'bg-indigo-50 border border-indigo-200' :
         isDone ? 'bg-emerald-50 border border-emerald-200' : 'bg-gray-50 border border-gray-200'
       }`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
             {isRunning && (
               <div className="relative w-5 h-5 flex-shrink-0">
                 <div className="absolute inset-0 border-2 border-indigo-200 rounded-full" />
@@ -797,35 +1329,80 @@ function ProgressCard({ status, showBar }: { status: any; showBar?: boolean }) {
               </div>
             )}
             {isError && <span className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0">!</span>}
-            <p className={`text-sm font-medium ${
+            <p className={`text-sm font-medium truncate ${
               isError ? 'text-red-700' : isRunning ? 'text-indigo-700' : 'text-emerald-700'
-            }`}>{status.progress}</p>
+            }`}>{status.progress || (isRunning ? 'Inicializando...' : isDone ? 'Completado' : '')}</p>
           </div>
-          {typeof status.percent === 'number' && isRunning && (
-            <span className="text-sm font-bold text-indigo-700">{status.percent}%</span>
-          )}
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {isRunning && (
+              <span className="text-xs font-mono text-indigo-600 bg-white/60 px-2 py-0.5 rounded">
+                {formatElapsed(elapsed)}
+              </span>
+            )}
+            {percent !== null && (
+              <span className={`text-lg font-bold ${isError ? 'text-red-700' : isRunning ? 'text-indigo-700' : 'text-emerald-700'}`}>
+                {percent}%
+              </span>
+            )}
+          </div>
         </div>
 
-        {/* Progress bar */}
-        {(showBar || isRunning) && typeof status.percent === 'number' && (
-          <div className="mt-3 w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-            <div className={`h-full rounded-full transition-all duration-500 ease-out ${
-              isError ? 'bg-red-500' : isDone ? 'bg-emerald-500' : 'bg-indigo-500'
-            }`} style={{ width: `${status.percent}%` }} />
+        {/* Progress bar — siempre visible cuando corre */}
+        {(showBar || isRunning) && (
+          <div className="mt-3 w-full h-3 bg-gray-200 rounded-full overflow-hidden relative">
+            {hasDetPercent ? (
+              <div className={`h-full rounded-full transition-all duration-500 ease-out ${
+                isError ? 'bg-red-500' : isDone ? 'bg-emerald-500' : 'bg-gradient-to-r from-indigo-500 to-indigo-600'
+              }`} style={{ width: `${percent}%` }}>
+                <div className="h-full w-full bg-gradient-to-r from-transparent via-white/30 to-transparent animate-[shimmer_2s_infinite]"
+                  style={{ backgroundSize: '200% 100%' }} />
+              </div>
+            ) : isRunning ? (
+              // Indeterminado: barra animada sliding
+              <div className="h-full absolute top-0 left-0 w-1/3 bg-gradient-to-r from-indigo-400 to-indigo-600 rounded-full animate-[indeterminate_1.5s_ease-in-out_infinite]" />
+            ) : null}
           </div>
+        )}
+
+        {/* Hint cuando no hay progreso aun */}
+        {isRunning && !hasDetPercent && (
+          <p className="text-[11px] text-indigo-600 mt-2 italic">
+            Preparando... (descargando modelo base y cargando dataset, puede tardar ~30s)
+          </p>
         )}
       </div>
 
-      {/* Log */}
-      {status.log?.length > 0 && (
-        <div className="bg-slate-900 rounded-xl p-4 mt-3 max-h-48 overflow-y-auto">
-          {status.log.map((line: string, i: number) => (
-            <p key={i} className={`text-xs font-mono leading-relaxed ${
-              line.includes('ERROR') ? 'text-red-400' :
-              line.includes('->') || line.includes('Completado') || line.includes('completado') ? 'text-emerald-400' :
-              'text-slate-400'
-            }`}>{line}</p>
-          ))}
+      {/* Log — siempre visible cuando esta corriendo o hay log */}
+      {(isRunning || isError || (status.log?.length > 0)) && (
+        <div className="mt-3">
+          <div className="flex items-center justify-between mb-1.5 px-1">
+            <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+              {isRunning && <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />}
+              Log en vivo
+            </span>
+            {status.log?.length > 0 && (
+              <span className="text-[10px] text-gray-400">{status.log.length} lineas</span>
+            )}
+          </div>
+          <div ref={logRef} className="bg-slate-900 rounded-xl p-4 max-h-64 overflow-y-auto border border-slate-800">
+            {status.log?.length > 0 ? (
+              status.log.map((line: string, i: number) => (
+                <p key={i} className={`text-xs font-mono leading-relaxed ${
+                  line.includes('ERROR') ? 'text-red-400' :
+                  line.includes('->') || line.includes('Completado') || line.includes('completado') ? 'text-emerald-400' :
+                  line.includes('Epoch') ? 'text-indigo-300' :
+                  'text-slate-400'
+                }`}>{line}</p>
+              ))
+            ) : (
+              <div className="flex items-center gap-2 py-2">
+                <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" />
+                <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
+                <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
+                <p className="text-xs font-mono text-slate-500 ml-2">Esperando primera linea del log...</p>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

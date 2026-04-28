@@ -7,6 +7,33 @@ from api.database import fetch_one, fetch_all, get_connection
 from api.shared.process_state import (
     DATA_DIR, VIDEOS_DIR, FRAMES_DIR, process_status, now,
 )
+from api.controllers.attribution_utils import (
+    classify_team_by_color, parse_hsv_from_db, is_on_pitch,
+)
+
+
+def _load_team_colors_for_match(match_id: str) -> tuple[dict, dict]:
+    """Carga HSV primario y secundario de local + visitante del partido."""
+    partido = fetch_one(
+        "SELECT equipo_local, equipo_visitante FROM partidos WHERE match_id = %s",
+        (match_id,),
+    )
+    primary = {}
+    secondary = {}
+    if not partido:
+        return primary, secondary
+    for team_id in (partido.get("equipo_local"), partido.get("equipo_visitante")):
+        if team_id and team_id != "desconocido":
+            row = fetch_one(
+                "SELECT color_primario_hsv, color_secundario_hsv FROM entidades WHERE entity_id = %s",
+                (team_id,),
+            )
+            if row:
+                primary[team_id] = parse_hsv_from_db(row.get("color_primario_hsv"))
+                sec = parse_hsv_from_db(row.get("color_secundario_hsv"))
+                if sec is not None:
+                    secondary[team_id] = sec
+    return primary, secondary
 
 
 def run_pipeline(match_id: str) -> dict:
@@ -61,20 +88,41 @@ def run_pipeline(match_id: str) -> dict:
             cap.release()
             log.append(f"[{now()}]   -> {extracted} frames ({duration_sec}s)")
 
-            # ── STEP 2: YOLO ──
-            log.append(f"[{now()}] [2/6] Detectando logos...")
-            process_status["pipeline"]["progress"] = "[2/6] Detectando logos..."
+            # ── STEP 2: YOLO (doble modelo: logos + personas) ──
+            log.append(f"[{now()}] [2/6] Detectando logos y personas...")
+            process_status["pipeline"]["progress"] = "[2/6] Detectando logos y personas..."
             model = YOLO(model_path)
+            person_model = YOLO('yolov8n.pt')  # COCO pre-entrenado
             frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
-            all_detections = _detect_logos(model, frames_dir, frame_files, match_id, fps, duration_sec, log)
+
+            # Colores de los equipos del partido (primario + secundario)
+            team_colors, team_secondary = _load_team_colors_for_match(match_id)
+
+            all_detections = _detect_logos(
+                model, person_model, frames_dir, frame_files, match_id, fps, duration_sec, log,
+                team_colors=team_colors, team_secondary=team_secondary,
+            )
             log.append(f"[{now()}]   -> {len(all_detections)} detecciones")
+            on_player_count = sum(1 for d in all_detections if d.get("on_player"))
+            tribuna_count = sum(1 for d in all_detections if d.get("source") == "tribuna_staff")
+            log.append(f"[{now()}]   -> Filtro pitch verde: {on_player_count} jugadores reales, {tribuna_count} tribuna/staff descartados")
+            # Desglose por entity
+            by_entity: dict = {}
+            for d in all_detections:
+                eid = d.get("entity_id") or "sin_equipo"
+                by_entity[eid] = by_entity.get(eid, 0) + 1
+            log.append(f"[{now()}]   -> {on_player_count} sobre jugador, {len(all_detections) - on_player_count} estadio/valla")
+            log.append(f"[{now()}]   -> {overlay_count} overlays digitales, {len(all_detections) - overlay_count} fisicos")
+            log.append(f"[{now()}]   -> Atribucion por equipo: {by_entity}")
 
             # ── STEP 3: Clasificar posicion ──
             log.append(f"[{now()}] [3/6] Clasificando posicion...")
             process_status["pipeline"]["progress"] = "[3/6] Clasificando posicion..."
             img_h, img_w = _get_image_dimensions(frames_dir, frame_files)
             for det in all_detections:
-                det["position_type"] = _classify_position(det["bbox"], img_w, img_h)
+                det["position_type"] = _classify_position(
+                    det["bbox"], img_w, img_h, on_player=det.get("on_player", False),
+                )
             positions = {}
             for d in all_detections:
                 positions[d["position_type"]] = positions.get(d["position_type"], 0) + 1
@@ -97,6 +145,7 @@ def run_pipeline(match_id: str) -> dict:
             # ── STEP 6: BD ──
             log.append(f"[{now()}] [6/6] Guardando en BD...")
             process_status["pipeline"]["progress"] = "[6/6] Guardando en BD..."
+            _ensure_partido(match_id, duration_sec, log)
             inserted = _save_detections(all_detections, match_id, log)
 
             log.append(f"[{now()}]   -> {inserted} guardadas")
@@ -132,34 +181,116 @@ def _get_image_dimensions(frames_dir, frame_files):
     return img_h, img_w
 
 
-def _detect_logos(model, frames_dir, frame_files, match_id, fps, duration_sec, log):
+def _ioa(logo_bbox, person_bbox):
+    """Intersection over logo area: cuanto del logo esta dentro de la persona (0-1)."""
+    lx1, ly1, lx2, ly2 = logo_bbox
+    px1, py1, px2, py2 = person_bbox
+    ix1, iy1 = max(lx1, px1), max(ly1, py1)
+    ix2, iy2 = min(lx2, px2), min(ly2, py2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    logo_area = (lx2 - lx1) * (ly2 - ly1)
+    return (inter / logo_area) if logo_area > 0 else 0.0
+
+
+def _detect_logos(logo_model, person_model, frames_dir, frame_files, match_id, fps, duration_sec, log,
+                  team_colors=None, team_secondary=None):
+    import cv2
+    team_colors = team_colors or {}
+    team_secondary = team_secondary or {}
     detections = []
     for i, fname in enumerate(frame_files):
         fpath = os.path.join(frames_dir, fname)
-        results = model(fpath, verbose=False)
+        frame_img = cv2.imread(fpath)
+        logo_results = logo_model(fpath, verbose=False)
+        # Clase 0 de COCO = person
+        person_results = person_model(fpath, verbose=False, classes=[0], conf=0.3)
+
+        # Juntar todas las cajas de personas de este frame
+        person_boxes = []
+        for r in person_results:
+            if r.boxes is None:
+                continue
+            for box in r.boxes:
+                person_boxes.append(box.xyxy[0].tolist())
+
         second = int(fname.split('_')[1].split('.')[0])
 
-        for r in results:
+        for r in logo_results:
             if r.boxes is None:
                 continue
             for box in r.boxes:
                 conf = float(box.conf)
+                logo_bbox = box.xyxy[0].tolist()
+                sponsor_id = logo_model.names[int(box.cls)]
+
+                # Chequear solape con cualquier persona + mejor candidato
+                max_overlap = 0.0
+                best_person_bbox = None
+                for pb in person_boxes:
+                    ioa = _ioa(logo_bbox, pb)
+                    if ioa > max_overlap:
+                        max_overlap = ioa
+                        best_person_bbox = pb
+
+                # Filtro pitch verde: es jugador REAL solo si esta en la cancha
+                on_pitch = False
+                pitch_ratio = 0.0
+                if best_person_bbox is not None and max_overlap >= 0.5 and frame_img is not None:
+                    on_pitch, pitch_ratio = is_on_pitch(frame_img, best_person_bbox)
+
+                on_player = max_overlap >= 0.5 and on_pitch
+                # Distinguir: hincha/staff que se solapa con el logo pero NO esta en cancha
+                if max_overlap >= 0.5 and not on_pitch:
+                    source = "tribuna_staff"
+                else:
+                    source = "jugador" if on_player else "estadio"
+
+                # Atribucion por equipo (solo si es JUGADOR REAL en la cancha)
+                entity_id = None
+                entity_type = None
+                color_distance = None
+                if on_player and team_colors and frame_img is not None:
+                    entity_id, color_distance = classify_team_by_color(
+                        frame_img, logo_bbox, team_colors, team_secondary,
+                    )
+                    entity_type = "club"
+                elif source == "tribuna_staff":
+                    # Hincha/staff: atribuir a liga porque no es camiseta oficial de equipo
+                    entity_id = "liga_1"
+                    entity_type = "league"
+                else:
+                    # Logos en vallas/estadio (sin persona) se atribuyen a la liga
+                    entity_id = "liga_1"
+                    entity_type = "league"
+
                 detections.append({
                     "match_id": match_id,
                     "frame_number": second * int(fps),
                     "timestamp_seg": second,
-                    "sponsor_id": model.names[int(box.cls)],
+                    "sponsor_id": sponsor_id,
                     "confidence": conf,
-                    "bbox": box.xyxy[0].tolist(),
+                    "bbox": logo_bbox,
                     "position_type": "desconocido",
                     "context_type": "juego_vivo",
                     "context_multiplier": 1.0,
-                    "entity_id": None, "entity_type": None, "localidad": None,
+                    "entity_id": entity_id,
+                    "entity_type": entity_type,
+                    "localidad": None,
+                    "color_distancia": round(color_distance, 2) if color_distance is not None else None,
                     "match_period": "primera_mitad" if second < duration_sec / 2 else "segunda_mitad",
                     "match_minute": second // 60,
                     "qi_score": 0.0, "smv_parcial": 0.0,
                     "aprobada": 1 if conf >= 0.5 else 0,
                     "zona_confianza": "verde" if conf >= 0.7 else ("amarilla" if conf >= 0.5 else "roja"),
+                    # Fuente
+                    "on_player": on_player,
+                    "player_overlap": round(max_overlap, 3),
+                    "on_pitch": on_pitch,
+                    "pitch_ratio": pitch_ratio,
+                    "source": source,
+                    "persons_in_frame": len(person_boxes),
                 })
 
         if (i + 1) % 100 == 0:
@@ -169,7 +300,11 @@ def _detect_logos(model, frames_dir, frame_files, match_id, fps, duration_sec, l
     return detections
 
 
-def _classify_position(bbox, img_w, img_h):
+def _classify_position(bbox, img_w, img_h, on_player: bool = False):
+    # Si el logo esta sobre una persona → camiseta (con alta confianza)
+    if on_player:
+        return "camiseta"
+
     x1, y1, x2, y2 = bbox
     w, h = x2 - x1, y2 - y1
     cy = (y1 + y2) / 2
@@ -179,8 +314,6 @@ def _classify_position(bbox, img_w, img_h):
         return "cenefa"
     if cy < img_h * 0.15 and area_ratio < 0.03:
         return "overlay_digital"
-    if area_ratio > 0.01 and img_h * 0.3 < cy < img_h * 0.8:
-        return "camiseta"
     if w > h * 3:
         return "valla_led"
     return "panel_mediocampo"
@@ -236,6 +369,30 @@ def _calculate_smv(detections, match_id):
         det["smv_parcial"] = round(smv, 2)
         total += smv
     return total
+
+
+def _ensure_partido(match_id: str, duration_sec: int, log):
+    """Crea un row en partidos si no existe — se marca como es_prueba=1.
+
+    Todo match auto-creado por el pipeline es de prueba. El usuario puede
+    promoverlo a real desde el dashboard cuando este conforme con los datos.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT match_id FROM partidos WHERE match_id = %s", (match_id,))
+    exists = cursor.fetchone()
+    if not exists:
+        cursor.execute(
+            """INSERT INTO partidos (match_id, equipo_local, equipo_visitante, torneo,
+               match_type, canal, audiencia_estimada, model_version, es_prueba)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (match_id, 'desconocido', 'desconocido', 'apertura',
+             'regular', 'l1max', 850000, 'yolo_v1.0', 1),
+        )
+        conn.commit()
+        log.append(f"[{now()}]   -> Partido '{match_id}' auto-registrado como PRUEBA (no cuenta en dashboard)")
+    cursor.close()
+    conn.close()
 
 
 def _save_detections(detections, match_id, log):

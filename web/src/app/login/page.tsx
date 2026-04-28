@@ -91,14 +91,6 @@ export default function LoginPage() {
           </p>
         </form>
 
-        {/* Demo credentials */}
-        <div className="mt-6 bg-white/5 border border-white/10 rounded-xl p-4">
-          <p className="text-xs text-slate-400 font-medium mb-2">Cuentas de prueba:</p>
-          <div className="space-y-1.5 text-xs text-slate-500">
-            <p><span className="text-slate-300">Admin:</span> admin@sponsorshipmvp.pe / demo2025</p>
-            <p><span className="text-slate-300">Cliente:</span> cliente@apuestatotal.pe / demo2025</p>
-          </div>
-        </div>
       </div>
     </div>
   )
