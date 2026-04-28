@@ -38,20 +38,31 @@ app.add_middleware(
 )
 
 
-# Rate limiting middleware — solo aplicado a endpoints sensibles (login)
-# Las rutas de admin GET/POST son frecuentes (polling, miniaturas, tokens) y satura
-# el limite si se aplica a todo. En produccion seria mejor por usuario+endpoint.
-RATE_LIMITED_PREFIXES = ("/api/auth/login", "/api/auth/register")
+# Rate limiting middleware — protege endpoints de auth contra brute-force
+# Otros endpoints (admin GET/POST) no se limitan: requieren JWT y son llamados
+# por el dashboard del admin (no son publicos).
+SENSITIVE_PREFIXES = ("/api/auth/login", "/api/auth/register")
 
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Solo limita login/register para evitar brute-force
-    # Todo lo demas es del admin y puede hacer requests rapidas (thumbnails, polling, etc)
-    if request.method != "OPTIONS" and any(request.url.path.startswith(p) for p in RATE_LIMITED_PREFIXES):
+    if request.method != "OPTIONS" and any(request.url.path.startswith(p) for p in SENSITIVE_PREFIXES):
         client_ip = request.client.host if request.client else "unknown"
         rate_limiter.check(client_ip)
     response = await call_next(request)
+    return response
+
+
+# Security headers middleware — agrega headers de seguridad a todas las respuestas
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    if ENV == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
