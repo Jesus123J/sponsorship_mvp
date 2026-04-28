@@ -227,3 +227,25 @@ def list_annotated() -> list:
 def list_all_objects() -> list:
     """Lista TODO lo que hay en el bucket — explorador generico."""
     return list_objects(prefix="")
+
+
+def import_video_to_local(remote_key: str, match_id: str) -> dict:
+    """Descarga un video desde R2 a /data/videos/<match_id>.mp4 listo para procesar."""
+    from api.shared.process_state import VIDEOS_DIR
+    if not match_id:
+        return {"error": "match_id requerido", "status": 400}
+    local_path = os.path.join(VIDEOS_DIR, f"{match_id}.mp4")
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+    if os.path.exists(local_path):
+        return {"error": f"Ya existe localmente: {match_id}.mp4", "status": 409}
+    r = download_file(remote_key, local_path)
+    if "error" in r:
+        return r
+    size_mb = round(os.path.getsize(local_path) / (1024 * 1024), 2)
+    return {
+        "imported": True,
+        "match_id": match_id,
+        "local_path": local_path,
+        "size_mb": size_mb,
+        "remote_key": remote_key,
+    }

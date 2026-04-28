@@ -66,6 +66,10 @@ export default function EtiquetarPage() {
   const [batchDetecting, setBatchDetecting] = useState(false)
   // Limite para empaquetar
   const [packageLimit, setPackageLimit] = useState<number>(0)
+  // R2
+  const [r2Videos, setR2Videos] = useState<any[]>([])
+  const [r2Configured, setR2Configured] = useState(false)
+  const [importingR2, setImportingR2] = useState<string>('')
   const imgRef = useRef<HTMLImageElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -78,7 +82,36 @@ export default function EtiquetarPage() {
     authFetch(`${API}/training/model/info`).then(r => r.json()).then(info => {
       setHasModel(!!info?.exists)
     }).catch(() => setHasModel(false))
+    // R2 — videos disponibles para importar
+    authFetch(`${API}/storage/status`).then(r => r.ok ? r.json() : null).then(s => {
+      if (s?.configured && !s.error) {
+        setR2Configured(true)
+        authFetch(`${API}/storage/videos`).then(r => r.ok ? r.json() : []).then(setR2Videos).catch(() => {})
+      }
+    }).catch(() => {})
   }, [])
+
+  const importFromR2AndExtract = async (remoteKey: string) => {
+    const filename = remoteKey.split('/').pop() || remoteKey
+    const defaultId = filename.replace(/\.mp4$/i, '').replace(/[^a-z0-9_-]/gi, '_').toLowerCase()
+    const matchId = prompt(`match_id para guardar:`, defaultId)
+    if (!matchId) return
+    setImportingR2(remoteKey)
+    try {
+      // 1. Importar de R2 a local
+      let res = await authFetch(`${API}/storage/import-video`, {
+        method: 'POST',
+        body: JSON.stringify({ remote_key: remoteKey, match_id: matchId }),
+      })
+      let data = await res.json()
+      if (!res.ok) throw new Error(data.detail)
+      // 2. Iniciar extraccion de frames
+      res = await authFetch(`${API}/training/extract-frames?match_id=${matchId}`, { method: 'POST' })
+      if (!res.ok) throw new Error((await res.json()).detail)
+      alert(`✅ Importado y extrayendo frames. Ve a /admin/pipeline paso 2 para ver progreso. Cuando termine, vuelve aqui y aparecera en la lista.`)
+    } catch (e: any) { alert(e.message) }
+    setImportingR2('')
+  }
 
   useEffect(() => {
     if (!selectedMatch) return
@@ -478,7 +511,25 @@ export default function EtiquetarPage() {
         {/* Sidebar 1: videos */}
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 max-h-[80vh] overflow-y-auto">
           <h3 className="text-xs font-semibold text-gray-500 uppercase mb-3">Videos disponibles</h3>
-          {videos.length === 0 && (
+
+          {/* R2 — videos para importar */}
+          {r2Configured && r2Videos.length > 0 && (
+            <div className="mb-4 bg-purple-50 border border-purple-200 rounded-lg p-2">
+              <p className="text-[10px] font-bold text-purple-900 uppercase mb-2">☁ Importar desde R2</p>
+              <div className="space-y-1">
+                {r2Videos.map((v: any) => (
+                  <button key={v.key} onClick={() => importFromR2AndExtract(v.key)}
+                    disabled={importingR2 === v.key}
+                    className="w-full text-left p-1.5 bg-white rounded text-[10px] hover:bg-purple-100 disabled:opacity-50">
+                    <p className="font-medium text-gray-900 truncate">{v.key.split('/').pop()}</p>
+                    <p className="text-gray-500">{v.size_mb} MB · {importingR2 === v.key ? '⏳ importando...' : '⬇ Importar + extraer frames'}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {videos.length === 0 && !r2Configured && (
             <p className="text-xs text-gray-400">
               No hay videos con frames. Ve a{' '}
               <a href="/admin/pipeline" className="text-indigo-600 underline">pipeline</a>.

@@ -41,9 +41,41 @@ export default function TrimVideoPage() {
   const [error, setError] = useState('')
   const videoRef = useRef<HTMLVideoElement>(null)
 
-  useEffect(() => {
+  const [r2Videos, setR2Videos] = useState<any[]>([])
+  const [r2Configured, setR2Configured] = useState(false)
+  const [importingR2, setImportingR2] = useState<string>('')
+
+  const loadAll = () => {
     authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
-  }, [])
+    authFetch(`${API}/storage/status`).then(r => r.ok ? r.json() : null).then(s => {
+      if (s?.configured && !s.error) {
+        setR2Configured(true)
+        authFetch(`${API}/storage/videos`).then(r => r.ok ? r.json() : []).then(setR2Videos).catch(() => {})
+      }
+    }).catch(() => {})
+  }
+
+  useEffect(() => { loadAll() }, [])
+
+  const importFromR2 = async (remoteKey: string) => {
+    const filename = remoteKey.split('/').pop() || remoteKey
+    const defaultId = filename.replace(/\.mp4$/i, '').replace(/[^a-z0-9_-]/gi, '_').toLowerCase()
+    const matchId = prompt(`match_id para guardar:`, defaultId)
+    if (!matchId) return
+    setImportingR2(remoteKey)
+    try {
+      const res = await authFetch(`${API}/storage/import-video`, {
+        method: 'POST',
+        body: JSON.stringify({ remote_key: remoteKey, match_id: matchId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail)
+      alert(`✅ Importado: ${data.match_id}`)
+      loadAll()
+      selectVideo(matchId)
+    } catch (e: any) { alert(e.message) }
+    setImportingR2('')
+  }
 
   const selectVideo = async (matchId: string) => {
     setSelected(matchId)
@@ -123,7 +155,25 @@ export default function TrimVideoPage() {
         {/* Lista de videos */}
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 lg:col-span-1">
           <h2 className="text-sm font-semibold text-gray-900 mb-3">Videos disponibles</h2>
-          {videos.length === 0 && (
+
+          {/* R2 import */}
+          {r2Configured && r2Videos.length > 0 && (
+            <div className="mb-4 bg-purple-50 border border-purple-200 rounded-lg p-2">
+              <p className="text-[10px] font-bold text-purple-900 uppercase mb-2">☁ Importar de R2</p>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {r2Videos.map((v: any) => (
+                  <button key={v.key} onClick={() => importFromR2(v.key)}
+                    disabled={importingR2 === v.key}
+                    className="w-full text-left p-1.5 bg-white rounded text-[10px] hover:bg-purple-100 disabled:opacity-50">
+                    <p className="font-medium text-gray-900 truncate">{v.key.split('/').pop()}</p>
+                    <p className="text-gray-500">{v.size_mb} MB</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {videos.length === 0 && !r2Configured && (
             <p className="text-xs text-gray-400 text-center py-8">
               No hay videos. Sube uno en{' '}
               <a href="/admin/pipeline" className="text-indigo-600 underline">/admin/pipeline</a>

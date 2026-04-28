@@ -54,12 +54,42 @@ export default function AnalyzeVideoPage() {
   const pollRef = useRef<any>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
+  const [r2Videos, setR2Videos] = useState<any[]>([])
+  const [r2Configured, setR2Configured] = useState(false)
+  const [importingR2, setImportingR2] = useState<string>('')
+
+  const importFromR2 = async (remoteKey: string) => {
+    const filename = remoteKey.split('/').pop() || remoteKey
+    const defaultId = filename.replace(/\.mp4$/i, '').replace(/[^a-z0-9_-]/gi, '_').toLowerCase()
+    const matchId = prompt(`match_id para guardar:`, defaultId)
+    if (!matchId) return
+    setImportingR2(remoteKey)
+    try {
+      const res = await authFetch(`${API}/storage/import-video`, {
+        method: 'POST',
+        body: JSON.stringify({ remote_key: remoteKey, match_id: matchId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail)
+      alert(`✅ Importado: ${data.match_id}. Selecciónalo abajo.`)
+      authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
+      setSelected(matchId)
+    } catch (e: any) { alert(e.message) }
+    setImportingR2('')
+  }
+
   useEffect(() => {
     authFetch(`${API}/training/videos`).then(r => r.json()).then(setVideos).catch(() => {})
     authFetch(`${API}/catalog/equipos`).then(r => r.json()).then(setEquipos).catch(() => {})
     authFetch(`${API}/catalog/estadios`).then(r => r.json()).then(setEstadios).catch(() => {})
     authFetch(`${API}/catalog/torneos`).then(r => r.json()).then(setTorneos).catch(() => {})
     authFetch(`${API}/catalog/partidos`).then(r => r.json()).then(setPartidos).catch(() => {})
+    authFetch(`${API}/storage/status`).then(r => r.ok ? r.json() : null).then(s => {
+      if (s?.configured && !s.error) {
+        setR2Configured(true)
+        authFetch(`${API}/storage/videos`).then(r => r.ok ? r.json() : []).then(setR2Videos).catch(() => {})
+      }
+    }).catch(() => {})
     authFetch(`${API}/training/analyze-video/status`).then(r => r.json()).then(s => {
       if (s?.running) {
         setStatus(s); setSelected(s.match_id)
@@ -329,6 +359,31 @@ export default function AnalyzeVideoPage() {
       {/* Config */}
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
         <h2 className="text-sm font-semibold text-gray-900 mb-4">1. Elegir video y parametros</h2>
+
+        {/* R2 import */}
+        {r2Configured && r2Videos.length > 0 && (
+          <div className="mb-4 bg-purple-50 border border-purple-200 rounded-xl p-3">
+            <p className="text-xs font-bold text-purple-900 mb-2">☁ Importar desde Cloudflare R2</p>
+            <div className="flex flex-wrap gap-2">
+              {r2Videos.map((v: any) => {
+                const filename = v.key.split('/').pop()
+                const localExists = videos.some((lv: any) => lv.match_id === filename?.replace(/\.mp4$/i, '').toLowerCase())
+                return (
+                  <button key={v.key} onClick={() => importFromR2(v.key)}
+                    disabled={importingR2 === v.key || localExists}
+                    title={localExists ? 'Ya importado' : 'Importar a local'}
+                    className={`px-2 py-1 rounded text-[10px] font-medium ${
+                      localExists ? 'bg-emerald-100 text-emerald-700' :
+                      importingR2 === v.key ? 'bg-gray-100 text-gray-400' :
+                      'bg-purple-600 text-white hover:bg-purple-700'
+                    }`}>
+                    {localExists ? '✓' : importingR2 === v.key ? '⏳' : '⬇'} {filename} ({v.size_mb}MB)
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
           <div>

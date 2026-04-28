@@ -121,3 +121,23 @@ def browse_all(current_user: dict = Depends(require_admin)):
     if not ctrl.is_configured():
         raise HTTPException(503, "R2 no configurado")
     return ctrl.list_all_objects()
+
+
+@router.post("/import-video")
+async def import_video(request: Request, current_user: dict = Depends(require_admin)):
+    """Descarga un video de R2 al disco local listo para extraccion de frames."""
+    if not ctrl.is_configured():
+        raise HTTPException(503, "R2 no configurado")
+    raw = await request.body()
+    data = json.loads(raw) if raw else {}
+    remote_key = data.get("remote_key", "").strip()
+    match_id = data.get("match_id", "").strip()
+    if not remote_key:
+        raise HTTPException(400, "remote_key requerido")
+    if not match_id:
+        # Auto-deriva el match_id del nombre del archivo
+        match_id = os.path.basename(remote_key).replace(".mp4", "").replace(" ", "_").lower()
+    r = ctrl.import_video_to_local(remote_key, match_id)
+    if "error" in r:
+        raise HTTPException(r.get("status", 500), r["error"])
+    return r

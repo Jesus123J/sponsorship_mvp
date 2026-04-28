@@ -43,6 +43,7 @@ export default function PipelinePage() {
     loadModelInfo()
     loadVideos()
     loadMatches()
+    loadR2Videos()
     // Detecta entrenamiento o pipeline ya corriendo y re-conecta polling
     authFetch(`${API}/training/train/status`).then(r => r.json()).then(s => {
       if (s?.running) {
@@ -73,6 +74,37 @@ export default function PipelinePage() {
   }, [])
 
   const loadModelInfo = () => authFetch(`${API}/training/model/info`).then(r => r.json()).then(setModelInfo).catch(() => {})
+  const [r2Videos, setR2Videos] = useState<any[]>([])
+  const [r2Configured, setR2Configured] = useState(false)
+  const [importingR2, setImportingR2] = useState<string>('')
+  const loadR2Videos = () => {
+    authFetch(`${API}/storage/status`).then(r => r.ok ? r.json() : null).then(s => {
+      if (s?.configured && !s.error) {
+        setR2Configured(true)
+        authFetch(`${API}/storage/videos`).then(r => r.ok ? r.json() : []).then(setR2Videos).catch(() => {})
+      } else {
+        setR2Configured(false)
+      }
+    }).catch(() => setR2Configured(false))
+  }
+  const importFromR2 = async (remoteKey: string) => {
+    const filename = remoteKey.split('/').pop() || remoteKey
+    const defaultId = filename.replace(/\.mp4$/i, '').replace(/[^a-z0-9_-]/gi, '_').toLowerCase()
+    const matchId = prompt(`match_id para guardar localmente:`, defaultId)
+    if (!matchId) return
+    setImportingR2(remoteKey)
+    try {
+      const res = await authFetch(`${API}/storage/import-video`, {
+        method: 'POST',
+        body: JSON.stringify({ remote_key: remoteKey, match_id: matchId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail)
+      alert(`✅ Video importado: ${data.match_id} (${data.size_mb} MB)`)
+      loadVideos()
+    } catch (e: any) { alert(e.message) }
+    setImportingR2('')
+  }
   const loadVideos = () => authFetch(`${API}/training/videos`).then(r => r.json()).then(list => {
     setVideos(list)
     // Cargar frames existentes de cada video
@@ -440,7 +472,41 @@ export default function PipelinePage() {
           </div>
 
           <div className="flex items-center gap-3 mb-6">
-            <div className="flex-1 h-px bg-gray-200" /><span className="text-xs text-gray-400">o sube archivo</span><div className="flex-1 h-px bg-gray-200" />
+            <div className="flex-1 h-px bg-gray-200" /><span className="text-xs text-gray-400">o</span><div className="flex-1 h-px bg-gray-200" />
+          </div>
+
+          {/* Importar desde Cloudflare R2 */}
+          {r2Configured && (
+            <div className="bg-purple-50 border border-purple-200 rounded-xl p-5 mb-6">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                <span className="text-lg">☁</span> Importar desde Cloudflare R2
+              </h3>
+              {r2Videos.length === 0 ? (
+                <p className="text-xs text-gray-500">
+                  No hay videos en R2. Sube primero a tu bucket o usa{' '}
+                  <a href="/admin/storage" className="text-indigo-600 underline">/admin/storage</a>
+                </p>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {r2Videos.map((v: any) => (
+                    <div key={v.key} className="flex items-center justify-between bg-white rounded-lg p-2 border border-purple-100">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-gray-900 truncate">🎬 {v.key}</p>
+                        <p className="text-[10px] text-gray-500">{v.size_mb} MB</p>
+                      </div>
+                      <button onClick={() => importFromR2(v.key)} disabled={importingR2 === v.key}
+                        className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-semibold hover:bg-purple-700 disabled:opacity-50 ml-2 flex-shrink-0">
+                        {importingR2 === v.key ? '⏳ Importando...' : '⬇ Importar'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center gap-3 mb-6">
+            <div className="flex-1 h-px bg-gray-200" /><span className="text-xs text-gray-400">o sube archivo desde tu PC</span><div className="flex-1 h-px bg-gray-200" />
           </div>
 
           <label className={`block border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors ${
